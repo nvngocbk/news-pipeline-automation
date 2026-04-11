@@ -132,6 +132,7 @@ def normalize_story(entry, idx):
             summary_vi += '.'
     title_en = title_vi
     summary_en = summary_vi
+    pub_dt = parse_pub_date(entry.get('pub_date', ''))
     return {
         'id': f'story-{idx:02d}',
         'headline_vi': title_vi,
@@ -143,9 +144,24 @@ def normalize_story(entry, idx):
         'source_url': entry['link'],
         'image_url': entry.get('image_url'),
         'pub_date': entry.get('pub_date', ''),
+        'pub_dt': pub_dt,
         'category': category_from_text(title_vi, summary_vi),
         'tokens': tokenize(title_vi + ' ' + summary_vi),
     }
+
+
+def parse_pub_date(pub_date_raw: str):
+    if not pub_date_raw:
+        return None
+    try:
+        dt = parsedate_to_datetime(pub_date_raw)
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=runtime.now.tzinfo)
+    else:
+        dt = dt.astimezone(runtime.now.tzinfo)
+    return dt
 
 
 def parse_rss(feed_name: str, url: str):
@@ -254,10 +270,22 @@ def pick_stories(pool):
         hay = (candidate['headline_vi'] + ' ' + candidate['summary_vi']).lower()
         return sum(1 for kw in FOCUS_KEYWORDS if kw in hay)
 
+    def recency_score(candidate):
+        pub_dt = candidate.get('pub_dt')
+        if not pub_dt:
+            return 0
+        if pub_dt.tzinfo is None:
+            pub_dt = pub_dt.replace(tzinfo=runtime.now.tzinfo)
+        else:
+            pub_dt = pub_dt.astimezone(runtime.now.tzinfo)
+        delta = (runtime.now - pub_dt).total_seconds() / 3600
+        return max(0, 24 - delta)
+
     ranked_pool = sorted(
         pool,
         key=lambda c: (
             focus_score(c),
+            recency_score(c),
             0 if c['category'] in prior_categories else 1,
             len(c['tokens'])
         ),
