@@ -124,9 +124,14 @@ def parse_pub_date(pub_date_raw: str):
     if not pub_date_raw:
         return None
     try:
-        return parsedate_to_datetime(pub_date_raw)
+        dt = parsedate_to_datetime(pub_date_raw)
     except Exception:
         return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=runtime.now.tzinfo)
+    else:
+        dt = dt.astimezone(runtime.now.tzinfo)
+    return dt
 
 
 def viral_score(text: str) -> int:
@@ -303,9 +308,14 @@ def pick_stories(pool):
         return CATEGORY_PRIORITY.get(candidate.get('category', 'khác'), 0)
 
     def recency_score(candidate):
-        if not candidate.get('pub_dt'):
+        pub_dt = candidate.get('pub_dt')
+        if not pub_dt:
             return 0
-        delta = (runtime.now - candidate['pub_dt']).total_seconds() / 3600
+        if pub_dt.tzinfo is None:
+            pub_dt = pub_dt.replace(tzinfo=runtime.now.tzinfo)
+        else:
+            pub_dt = pub_dt.astimezone(runtime.now.tzinfo)
+        delta = (runtime.now - pub_dt).total_seconds() / 3600
         return max(0, 24 - delta)
 
     ranked_pool = sorted(
