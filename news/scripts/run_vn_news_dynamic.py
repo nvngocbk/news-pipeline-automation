@@ -61,7 +61,31 @@ STOPWORDS = {
 BLACKLIST_KEYWORDS = {
     'onsen', 'ecopark', 'khuyến mãi', 'ưu đãi', 'mỹ phẩm', 'làm đẹp', 'da lão hóa', 'quán cà phê',
     'bắt cá', 'hái nho', 'forest onsen', 'du lịch', 'giải trí', 'showbiz', 'hoa hậu', 'bóng đá',
-    'xe máy điện', 'cà phê vườn', 'ung thư vú', 'bác sĩ chỉ ra', 'thói quen', 'sản phẩm'
+    'xe máy điện', 'cà phê vườn', 'ung thư vú', 'bác sĩ chỉ ra', 'thói quen', 'sản phẩm',
+    'mẹo vặt', 'bí quyết', 'cách làm', 'review', 'trải nghiệm', 'giảm cân', 'detox', 'làm giàu nhanh'
+}
+
+VIRAL_KEYWORDS = {
+    'bắt', 'khởi tố', 'xét xử', 'tuyên án', 'điều tra', 'lừa đảo', 'tham nhũng', 'đấu thầu',
+    'tăng giá', 'giảm giá', 'căng thẳng', 'tranh cãi', 'phản ứng', 'biểu tình', 'tai nạn',
+    'cháy', 'nổ', 'đâm', 'vụ án', 'clip', 'rò rỉ', 'cảnh báo', 'dừng', 'cấm', 'đình chỉ'
+}
+
+CONTROVERSY_KEYWORDS = {
+    'tranh cãi', 'phản ứng', 'bức xúc', 'phẫn nộ', 'làn sóng', 'gây sốc', 'chỉ trích', 'phản đối',
+    'cấm', 'đình chỉ', 'đề xuất', 'tăng giá', 'giảm giá'
+}
+
+CATEGORY_PRIORITY = {
+    'chính trị': 3,
+    'kinh tế': 3,
+    'xã hội': 2,
+    'giao thông': 2,
+    'y tế': 2,
+    'giáo dục': 1,
+    'thời tiết': 1,
+    'công nghệ': 1,
+    'khác': 0,
 }
 
 PRIOR_FILES_TO_SCAN = int(os.environ.get('PRIOR_FILES_TO_SCAN', '3'))
@@ -94,6 +118,25 @@ def tokenize(text: str):
     text = re.sub(r'[^\w\sàáạảãăắằẳẵặâấầẩẫậđèéẹẻẽêếềểễệìíịỉĩòóọỏõôốồổỗộơớờởỡợùúụủũưứừửữựỳýỵỷỹ]', ' ', text)
     tokens = [t for t in text.split() if len(t) >= 3 and t not in STOPWORDS and not t.isdigit()]
     return tokens
+
+
+def parse_pub_date(pub_date_raw: str):
+    if not pub_date_raw:
+        return None
+    try:
+        return parsedate_to_datetime(pub_date_raw)
+    except Exception:
+        return None
+
+
+def viral_score(text: str) -> int:
+    lowered = text.lower()
+    return sum(1 for kw in VIRAL_KEYWORDS if kw in lowered)
+
+
+def is_controversial(text: str) -> bool:
+    lowered = text.lower()
+    return any(kw in lowered for kw in CONTROVERSY_KEYWORDS)
 
 
 def category_from_text(title: str, desc: str):
@@ -132,6 +175,7 @@ def normalize_story(entry, idx):
             summary_vi += '.'
     title_en = title_vi
     summary_en = summary_vi
+    pub_dt = parse_pub_date(entry.get('pub_date', ''))
     return {
         'id': f'story-{idx:02d}',
         'headline_vi': title_vi,
@@ -143,6 +187,7 @@ def normalize_story(entry, idx):
         'source_url': entry['link'],
         'image_url': entry.get('image_url'),
         'pub_date': entry.get('pub_date', ''),
+        'pub_dt': pub_dt,
         'category': category_from_text(title_vi, summary_vi),
         'tokens': tokenize(title_vi + ' ' + summary_vi),
     }
@@ -254,11 +299,22 @@ def pick_stories(pool):
         hay = (candidate['headline_vi'] + ' ' + candidate['summary_vi']).lower()
         return sum(1 for kw in FOCUS_KEYWORDS if kw in hay)
 
+    def priority_score(candidate):
+        return CATEGORY_PRIORITY.get(candidate.get('category', 'khác'), 0)
+
+    def recency_score(candidate):
+        if not candidate.get('pub_dt'):
+            return 0
+        delta = (runtime.now - candidate['pub_dt']).total_seconds() / 3600
+        return max(0, 24 - delta)
+
     ranked_pool = sorted(
         pool,
         key=lambda c: (
             focus_score(c),
-            0 if c['category'] in prior_categories else 1,
+            priority_score(c),
+            viral_score(c['headline_vi'] + ' ' + c['summary_vi']),
+            recency_score(c),
             len(c['tokens'])
         ),
         reverse=True,
@@ -282,6 +338,18 @@ def pick_stories(pool):
         used_categories.add(candidate['category'])
         if len(selected) >= min(MIN_FOCUS_MATCHES, TARGET_STORIES):
             break
+
+    if not any(is_controversial(s['headline_vi'] + ' ' + s['summary_vi']) for s in selected):
+        for candidate in ranked_pool:
+            if candidate['source_url'] in used_links:
+                continue
+            if not candidate.get('image_url'):
+                continue
+            if is_controversial(candidate['headline_vi'] + ' ' + candidate['summary_vi']):
+                selected.append(candidate)
+                used_links.add(candidate['source_url'])
+                used_categories.add(candidate['category'])
+                break
 
     for candidate in ranked_pool:
         if candidate['source_url'] in used_links:
@@ -394,9 +462,14 @@ for story in stories:
         story['prepared_image'] = ''
         story['image_processing'] = 'image-missing'
 
-intro_vi = f"Dưới đây là những chuyển động trong nước đáng chú ý cập nhật lúc {RUN_HOUR}."
+intro_templates = [
+    f"3 diễn biến đang khiến dư luận chú ý lúc {RUN_HOUR}.",
+    f"Điểm nóng trong nước lúc {RUN_HOUR}: đây là 5 tin đáng bàn nhất.",
+    f"Lúc {RUN_HOUR}, có những chuyển động đang tạo nhiều tranh luận.",
+]
+intro_vi = intro_templates[int(RUN_HHMM) % len(intro_templates)]
 body_vi = '\n\n'.join(s['summary_vi'] for s in stories)
-outro_vi = f"Đó là những điểm tin trong nước đáng chú ý lúc {RUN_HOUR}."
+outro_vi = f"Bạn nghĩ tin nào tác động mạnh nhất? Đó là những điểm tin đáng chú ý lúc {RUN_HOUR}."
 voice_vi = (intro_vi + "\n\n" + body_vi + "\n\n" + outro_vi).strip() + "\n"
 
 intro_en = f"Here are the notable domestic developments updated at {RUN_HHMM[:2]}:00."
@@ -408,7 +481,7 @@ headline_list_vi = '\n'.join(s['headline_vi'] for s in stories) + '\n'
 headline_list_en = '\n'.join(s['headline_en'] for s in stories) + '\n'
 caption_vi = (
     f"Bản tin Việt Nam {RUN_HOUR}: " + '; '.join(s['headline_vi'] for s in stories[:3]) + '. '
-    "Theo dõi để cập nhật nhanh các chuyển động đáng chú ý trong nước."
+    "Theo bạn, diễn biến nào đáng lo nhất hôm nay?"
 )
 hashtags = '#tinvietnam #tinnong #tinthoisu #vietnamnews #capnhat #tiktoknews #xuhuong'
 
