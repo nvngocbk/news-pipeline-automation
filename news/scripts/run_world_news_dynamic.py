@@ -56,7 +56,28 @@ BLACKLIST_KEYWORDS = {
     'celebrity', 'actor', 'actress', 'singer', 'band', 'music', 'film', 'movie', 'hollywood', 'showbiz',
     'entertainment', 'sports', 'football', 'soccer', 'nba', 'tennis', 'golf', 'tiger woods', 'matthew perry',
     'grammy', 'oscars', 'fashion', 'runway', 'beauty', 'court', 'trial', 'lawsuit', 'sentenced', 'sentence',
-    'drug', 'prescription', 'pop star'
+    'drug', 'prescription', 'pop star', 'transfer window', 'champions league', 'premier league', 'box office'
+}
+
+VIRAL_KEYWORDS = {
+    'war', 'attack', 'strike', 'missile', 'drone', 'ceasefire', 'sanction', 'tariff', 'election', 'protest',
+    'crisis', 'escalation', 'warning', 'emergency', 'dead', 'killed', 'hostage', 'explosion', 'clash', 'threat'
+}
+
+CONTROVERSY_KEYWORDS = {
+    'controversy', 'backlash', 'criticized', 'condemn', 'debate', 'disputed', 'allegation', 'accused',
+    'protest', 'boycott', 'ceasefire', 'sanction', 'tariff'
+}
+
+CATEGORY_PRIORITY = {
+    'xung đột': 3,
+    'chính trị quốc tế': 3,
+    'ngoại giao': 2,
+    'kinh tế thế giới': 2,
+    'quyền con người': 2,
+    'biến đổi khí hậu': 1,
+    'khoa học - công nghệ': 1,
+    'thời sự quốc tế': 1,
 }
 
 META_DESCRIPTION_KEYS = [
@@ -203,6 +224,16 @@ def tokenize(text: str):
     text = re.sub(r'["\'`.,?!:;()\[\]\-]', ' ', text)
     tokens = [t for t in text.split() if len(t) >= 4 and t not in STOPWORDS and not t.isdigit()]
     return tokens
+
+
+def viral_score(text: str) -> int:
+    lowered = text.lower()
+    return sum(1 for kw in VIRAL_KEYWORDS if kw in lowered)
+
+
+def is_controversial(text: str) -> bool:
+    lowered = text.lower()
+    return any(kw in lowered for kw in CONTROVERSY_KEYWORDS)
 
 
 def parse_pub_date(pub_date_raw: str):
@@ -353,11 +384,23 @@ def focus_score(candidate):
 
 def pick_stories(pool):
     prior_tokens, prior_categories = load_prior_tokens()
+
+    def priority_score(candidate):
+        return CATEGORY_PRIORITY.get(candidate.get('category', 'thời sự quốc tế'), 0)
+
+    def recency_score(candidate):
+        if not candidate.get('pub_dt'):
+            return 0
+        delta = (runtime.now - candidate['pub_dt']).total_seconds() / 3600
+        return max(0, 24 - delta)
+
     ranked_pool = sorted(
         pool,
         key=lambda c: (
             focus_score(c),
-            c['pub_dt'].timestamp() if c['pub_dt'] else 0,
+            priority_score(c),
+            viral_score(c['headline_en'] + ' ' + c['summary_en']),
+            recency_score(c),
             len(c['tokens'])
         ),
         reverse=True,
@@ -378,6 +421,18 @@ def pick_stories(pool):
         used_categories.add(candidate['category'])
         if len(selected) >= min(MIN_FOCUS_MATCHES, TARGET_STORIES):
             break
+
+    if not any(is_controversial(s['headline_en'] + ' ' + s['summary_en']) for s in selected):
+        for candidate in ranked_pool:
+            if candidate['source_url'] in used_links:
+                continue
+            if not candidate.get('image_url'):
+                continue
+            if is_controversial(candidate['headline_en'] + ' ' + candidate['summary_en']):
+                selected.append(candidate)
+                used_links.add(candidate['source_url'])
+                used_categories.add(candidate['category'])
+                break
 
     for candidate in ranked_pool:
         if candidate['source_url'] in used_links:
@@ -469,16 +524,21 @@ for story in stories:
     story['prepared_image'] = str(out_path)
     story['image_processing'] = 'fit+blur'
 
-intro_vi = f"Bản tin thế giới cập nhật lúc {RUN_HOUR}."
+intro_templates = [
+    f"Tin số 1 sáng nay có thể làm cục diện quốc tế thay đổi lúc {RUN_HOUR}.",
+    f"5 diễn biến thế giới đang gây tranh luận mạnh lúc {RUN_HOUR}.",
+    f"Nếu chỉ xem 1 bản tin lúc {RUN_HOUR}, đây là 5 điểm nóng đáng theo dõi.",
+]
+intro_vi = intro_templates[int(RUN_HHMM) % len(intro_templates)]
 body_vi = '\n'.join(s['summary_vi'] for s in stories)
-outro_vi = f"Đó là những điểm nóng quốc tế đáng chú ý lúc {RUN_HOUR}."
+outro_vi = f"Theo bạn, diễn biến nào có thể leo thang tiếp? Đó là những điểm nóng quốc tế lúc {RUN_HOUR}."
 voice_vi = (intro_vi + '\n' + body_vi + '\n' + outro_vi).strip() + '\n'
 
 headline_list_vi = '\n'.join(s['headline_vi'] for s in stories) + '\n'
 headline_list_en = '\n'.join(s['headline_en'] for s in stories) + '\n'
 caption_vi = (
     f"Bản tin thế giới {RUN_HOUR}: " + '; '.join(s['headline_vi'] for s in stories[:3]) + '. '
-    "Theo dõi để không bỏ lỡ tin quốc tế quan trọng."
+    "Bạn nghĩ điểm nóng nào có thể tác động lớn nhất 24h tới?"
 )
 hashtags = '#tinthegioi #worldnews #quocte #internationalnews #OpenClaw'
 
