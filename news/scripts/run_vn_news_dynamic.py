@@ -603,14 +603,15 @@ for story in stories:
     out_img = str(PREP_DIR / f"{story['id']}-vertical.jpg")
     if src_img_path and os.path.exists(src_img_path):
         cmd = [
-            'ffmpeg', '-y', '-i', src_img_path, '-vf',
-            'scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,'
-            'crop=1080:1920,eq=contrast=1.03:saturation=1.03,unsharp=7:7:1.2:7:7:0.0,format=yuvj420p',
-            '-frames:v', '1', '-q:v', '1', out_img
+            'ffmpeg', '-y', '-i', src_img_path, '-filter_complex',
+            "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:10[bg];"
+            "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,unsharp=5:5:0.8:5:5:0.0[fg];"
+            "[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuvj420p",
+            '-frames:v', '1', '-q:v', '2', out_img
         ]
         subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         story['prepared_image'] = out_img
-        story['image_processing'] = 'center-crop+lanczos+unsharp'
+        story['image_processing'] = 'fit+blur'
     else:
         story['prepared_image'] = ''
         story['image_processing'] = 'image-missing'
@@ -731,7 +732,7 @@ manifest_lines = [
     'TTS speaking rate: 1.2',
     f'Audio duration seconds: {audio_duration:.3f}',
     f'Video duration seconds: {video_duration:.3f}',
-    'Prepared images: 1080x1920 center-crop + lanczos + unsharp',
+    'Prepared images: 1080x1920 fit+blur for all stories',
     f'Anti-repeat note: {anti_repeat_note}',
 ]
 for s in stories:
