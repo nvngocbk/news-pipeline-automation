@@ -239,6 +239,7 @@ def normalize_story(entry, idx):
     desc_vi = strip_html(entry.get('description', ''))
     if not desc_vi:
         desc_vi = title_vi
+    desc_vi = re.sub(r'^\([^)]{2,40}\)\s*[-–:]\s*', '', desc_vi).strip()
     desc_vi = re.sub(r'^[\-–•\s]+', '', desc_vi)
     desc_vi = re.sub(r'\s*\[.*?\]\s*$', '', desc_vi).strip()
     lowered = (title_vi + ' ' + desc_vi).lower()
@@ -549,18 +550,18 @@ def normalize_sentences(text: str):
 
 
 def build_journalist_voice(stories_local):
-    lead = f"Bản tin Việt Nam lúc {RUN_HOUR}. Sau đây là các diễn biến đáng chú ý trong ngày."
+    lead = f"Xin kính chào quý vị. Đây là bản tin Việt Nam cập nhật lúc {RUN_HOUR}."
     lines = [lead]
     script_units = []
-    for i, s in enumerate(stories_local, start=1):
+    for s in stories_local:
         sentences = normalize_sentences(s.get('summary_vi') or s.get('headline_vi') or '')
         if not sentences:
             sentences = [s['headline_vi']]
-        story_lines = [f"Tin {i}: {s['headline_vi']}."]
-        story_lines.extend(sentences[:2])
-        block = ' '.join(story_lines).strip()
-        if not block.endswith(('.', '!', '?')):
-            block += '.'
+        detail = ' '.join(sentences[:2]).strip()
+        if detail and not detail.endswith(('.', '!', '?')):
+            detail += '.'
+        block = f"{s['headline_vi']}. {detail}".strip()
+        block = re.sub(r'\s+', ' ', block)
         lines.append(block)
         script_units.append({
             'story_id': s['id'],
@@ -568,7 +569,7 @@ def build_journalist_voice(stories_local):
             'voice_block_vi': block,
             'sentence_count': len(sentences[:2]) + 1,
         })
-    outro = "Bản tin đến đây là hết. Chúng tôi sẽ tiếp tục cập nhật khi có diễn biến mới."
+    outro = "Bản tin tạm dừng tại đây. Chúng tôi sẽ tiếp tục cập nhật trong các bản tin tiếp theo."
     lines.append(outro)
     return '\n\n'.join(lines).strip() + '\n', script_units
 
