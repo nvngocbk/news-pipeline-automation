@@ -68,12 +68,24 @@ BLACKLIST_KEYWORDS = {
 VIRAL_KEYWORDS = {
     'bắt', 'khởi tố', 'xét xử', 'tuyên án', 'điều tra', 'lừa đảo', 'tham nhũng', 'đấu thầu',
     'tăng giá', 'giảm giá', 'căng thẳng', 'tranh cãi', 'phản ứng', 'biểu tình', 'tai nạn',
-    'cháy', 'nổ', 'đâm', 'vụ án', 'clip', 'rò rỉ', 'cảnh báo', 'dừng', 'cấm', 'đình chỉ'
+    'cháy', 'nổ', 'đâm', 'vụ án', 'clip', 'rò rỉ', 'cảnh báo', 'dừng', 'cấm', 'đình chỉ',
+    'truy nã', 'triệt phá', 'đột kích', 'phong tỏa', 'khẩn cấp', 'đề nghị truy tố', 'thu hồi', 'xử phạt'
 }
 
 CONTROVERSY_KEYWORDS = {
     'tranh cãi', 'phản ứng', 'bức xúc', 'phẫn nộ', 'làn sóng', 'gây sốc', 'chỉ trích', 'phản đối',
-    'cấm', 'đình chỉ', 'đề xuất', 'tăng giá', 'giảm giá'
+    'cấm', 'đình chỉ', 'đề xuất', 'tăng giá', 'giảm giá', 'khẩn cấp', 'nghi vấn', 'bất thường'
+}
+
+SOFT_NEWS_KEYWORDS = {
+    'mẹo', 'bí quyết', 'ăn gì', 'mặc gì', 'check-in', 'đi đâu', 'du lịch', 'review', 'trải nghiệm',
+    'showbiz', 'hoa hậu', 'lifestyle', 'ẩm thực', 'giải trí', 'tử vi', 'cung hoàng đạo', 'mua sắm'
+}
+
+HOT_NEWS_KEYWORDS = {
+    'bắt', 'khởi tố', 'điều tra', 'xét xử', 'tuyên án', 'lừa đảo', 'tham nhũng', 'truy nã', 'triệt phá',
+    'tai nạn', 'cháy', 'nổ', 'thương vong', 'cảnh báo', 'khẩn cấp', 'dịch', 'ngộ độc', 'thu hồi',
+    'tăng giá', 'siết', 'đình chỉ', 'xử phạt', 'cấm', 'đấu thầu', 'bất thường', 'áp thấp', 'bão', 'ngập'
 }
 
 CATEGORY_PRIORITY = {
@@ -90,10 +102,11 @@ CATEGORY_PRIORITY = {
 
 PRIOR_FILES_TO_SCAN = int(os.environ.get('PRIOR_FILES_TO_SCAN', '3'))
 ROLLING_HOURS = int(os.environ.get('ROLLING_HOURS', '24'))
-TARGET_STORIES = 5
+TARGET_STORIES = int(os.environ.get('TARGET_STORIES', '8'))
+TARGET_STORIES = max(8, min(10, TARGET_STORIES))
 FOCUS_KEYWORDS = [x.strip().lower() for x in os.environ.get('FOCUS_KEYWORDS', '').split('|') if x.strip()]
 INCLUDE_YESTERDAY = os.environ.get('INCLUDE_YESTERDAY', '0') == '1'
-MIN_FOCUS_MATCHES = int(os.environ.get('MIN_FOCUS_MATCHES', '3'))
+MIN_FOCUS_MATCHES = int(os.environ.get('MIN_FOCUS_MATCHES', str(max(3, TARGET_STORIES // 2))))
 
 
 def fetch(url: str) -> str:
@@ -191,6 +204,16 @@ def viral_score(text: str) -> int:
 def is_controversial(text: str) -> bool:
     lowered = text.lower()
     return any(kw in lowered for kw in CONTROVERSY_KEYWORDS)
+
+
+def hot_score(text: str) -> int:
+    lowered = text.lower()
+    return sum(1 for kw in HOT_NEWS_KEYWORDS if kw in lowered)
+
+
+def is_soft_news(text: str) -> bool:
+    lowered = text.lower()
+    return any(kw in lowered for kw in SOFT_NEWS_KEYWORDS)
 
 
 def category_from_text(title: str, desc: str):
@@ -367,66 +390,54 @@ def pick_stories(pool):
         delta = (runtime.now - pub_dt).total_seconds() / 3600
         return max(0, 24 - delta)
 
-    ranked_pool = sorted(
-        pool,
-        key=lambda c: (
-            focus_score(c),
-            priority_score(c),
-            viral_score(c['headline_vi'] + ' ' + c['summary_vi']),
-            recency_score(c),
-            len(c['tokens'])
-        ),
-        reverse=True,
-    )
+    def final_rank(candidate):
+        text = candidate['headline_vi'] + ' ' + candidate['summary_vi']
+        return (
+            focus_score(candidate),
+            hot_score(text),              # prioritize hotness first
+            viral_score(text),
+            recency_score(candidate),     # then freshness
+            priority_score(candidate),
+            len(candidate['tokens']),
+        )
 
-    focus_candidates = [c for c in ranked_pool if focus_score(c) > 0 and c.get('image_url')]
+    ranked_pool = sorted(pool, key=final_rank, reverse=True)
+
     selected = []
     used_links = set()
     used_categories = set()
     duplicate_pool = []
 
-    for candidate in focus_candidates:
-        if candidate['source_url'] in prior_links:
-            duplicate_pool.append(candidate)
-            continue
-        overlap = len(set(candidate['tokens']) & prior_tokens)
-        if overlap >= 6:
-            continue
-        selected.append(candidate)
-        used_links.add(candidate['source_url'])
-        used_categories.add(candidate['category'])
-        if len(selected) >= min(MIN_FOCUS_MATCHES, TARGET_STORIES):
-            break
-
-    if not any(is_controversial(s['headline_vi'] + ' ' + s['summary_vi']) for s in selected):
-        for candidate in ranked_pool:
-            if candidate['source_url'] in used_links:
-                continue
-            if not candidate.get('image_url'):
-                continue
-            if is_controversial(candidate['headline_vi'] + ' ' + candidate['summary_vi']):
-                selected.append(candidate)
-                used_links.add(candidate['source_url'])
-                used_categories.add(candidate['category'])
-                break
-
     for candidate in ranked_pool:
         if candidate['source_url'] in used_links:
             continue
+        if not candidate.get('image_url'):
+            continue
+
+        text = candidate['headline_vi'] + ' ' + candidate['summary_vi']
+        if is_soft_news(text):
+            continue
+
         if candidate['source_url'] in prior_links:
             duplicate_pool.append(candidate)
             continue
+
         overlap = len(set(candidate['tokens']) & prior_tokens)
-        same_category_penalty = candidate['category'] in prior_categories and focus_score(candidate) == 0
-        already_used_category = candidate['category'] in used_categories and focus_score(candidate) == 0
-        if overlap >= 4 and focus_score(candidate) == 0:
+        fs = focus_score(candidate)
+        hs = hot_score(text)
+
+        if overlap >= 5 and fs == 0 and hs < 2:
             continue
-        if already_used_category and len(selected) < TARGET_STORIES - 1:
+
+        # Allow repeated category when story is hot enough.
+        already_used_category = candidate['category'] in used_categories
+        if already_used_category and hs < 2 and len(selected) < TARGET_STORIES - 1:
             continue
-        if same_category_penalty and len(selected) < TARGET_STORIES - 2:
+
+        # Strongly prefer very recent hot stories.
+        if recency_score(candidate) < 12 and hs == 0 and fs == 0:
             continue
-        if not candidate.get('image_url'):
-            continue
+
         selected.append(candidate)
         used_links.add(candidate['source_url'])
         used_categories.add(candidate['category'])
@@ -438,6 +449,9 @@ def pick_stories(pool):
             if candidate['source_url'] in used_links:
                 continue
             if not candidate.get('image_url'):
+                continue
+            text = candidate['headline_vi'] + ' ' + candidate['summary_vi']
+            if is_soft_news(text):
                 continue
             selected.append(candidate)
             used_links.add(candidate['source_url'])
@@ -455,6 +469,37 @@ def pick_stories(pool):
             if len(selected) == TARGET_STORIES:
                 break
 
+    # enforce at least 3/5 hot headlines when possible
+    hot_count = sum(1 for s in selected if hot_score(s['headline_vi'] + ' ' + s['summary_vi']) > 0)
+    if hot_count < 3:
+        hot_pool = [
+            c for c in ranked_pool
+            if c['source_url'] not in used_links
+            and c.get('image_url')
+            and hot_score(c['headline_vi'] + ' ' + c['summary_vi']) > 0
+            and not is_soft_news(c['headline_vi'] + ' ' + c['summary_vi'])
+        ]
+        for hot_candidate in hot_pool:
+            # replace the least-hot selected item
+            selected_sorted = sorted(
+                selected,
+                key=lambda s: hot_score(s['headline_vi'] + ' ' + s['summary_vi'])
+            )
+            if not selected_sorted:
+                break
+            victim = selected_sorted[0]
+            victim_hot = hot_score(victim['headline_vi'] + ' ' + victim['summary_vi'])
+            if victim_hot >= hot_score(hot_candidate['headline_vi'] + ' ' + hot_candidate['summary_vi']):
+                continue
+            selected.remove(victim)
+            used_links.discard(victim['source_url'])
+            selected.append(hot_candidate)
+            used_links.add(hot_candidate['source_url'])
+            hot_count = sum(1 for s in selected if hot_score(s['headline_vi'] + ' ' + s['summary_vi']) > 0)
+            if hot_count >= 3:
+                break
+
+    selected = sorted(selected, key=final_rank, reverse=True)[:TARGET_STORIES]
     return selected, prior_categories, prior_links, scanned
 
 
@@ -493,6 +538,39 @@ all_sources = []
 for s in stories:
     src = s['sources'][0]
     all_sources.append(f"{s['headline_vi']} | {src['name']} | {src['url']}")
+
+
+def normalize_sentences(text: str):
+    text = strip_html(text)
+    chunks = [c.strip(' \n\t-•') for c in re.split(r'(?<=[.!?])\s+', text) if c.strip()]
+    if not chunks and text:
+        chunks = [text]
+    return chunks
+
+
+def build_journalist_voice(stories_local):
+    lead = f"Bản tin Việt Nam lúc {RUN_HOUR}. Sau đây là các diễn biến đáng chú ý trong ngày."
+    lines = [lead]
+    script_units = []
+    for i, s in enumerate(stories_local, start=1):
+        sentences = normalize_sentences(s.get('summary_vi') or s.get('headline_vi') or '')
+        if not sentences:
+            sentences = [s['headline_vi']]
+        story_lines = [f"Tin {i}: {s['headline_vi']}."]
+        story_lines.extend(sentences[:2])
+        block = ' '.join(story_lines).strip()
+        if not block.endswith(('.', '!', '?')):
+            block += '.'
+        lines.append(block)
+        script_units.append({
+            'story_id': s['id'],
+            'headline_vi': s['headline_vi'],
+            'voice_block_vi': block,
+            'sentence_count': len(sentences[:2]) + 1,
+        })
+    outro = "Bản tin đến đây là hết. Chúng tôi sẽ tiếp tục cập nhật khi có diễn biến mới."
+    lines.append(outro)
+    return '\n\n'.join(lines).strip() + '\n', script_units
 
 for story in stories:
     src_img_path = ''
@@ -537,26 +615,14 @@ for story in stories:
         story['prepared_image'] = ''
         story['image_processing'] = 'image-missing'
 
-intro_templates = [
-    f"3 diễn biến đang khiến dư luận chú ý lúc {RUN_HOUR}.",
-    f"Điểm nóng trong nước lúc {RUN_HOUR}: đây là 5 tin đáng bàn nhất.",
-    f"Lúc {RUN_HOUR}, có những chuyển động đang tạo nhiều tranh luận.",
-]
-intro_vi = intro_templates[int(RUN_HHMM) % len(intro_templates)]
-body_vi = '\n\n'.join(s['summary_vi'] for s in stories)
-outro_vi = f"Bạn nghĩ tin nào tác động mạnh nhất? Đó là những điểm tin đáng chú ý lúc {RUN_HOUR}."
-voice_vi = (intro_vi + "\n\n" + body_vi + "\n\n" + outro_vi).strip() + "\n"
-
-intro_en = f"Here are the notable domestic developments updated at {RUN_HHMM[:2]}:00."
-body_en = '\n\n'.join(s['summary_en'] for s in stories)
-outro_en = f"Those are the key domestic headlines at {RUN_HHMM[:2]}:00."
-voice_en = (intro_en + "\n\n" + body_en + "\n\n" + outro_en).strip() + "\n"
+voice_vi, script_units = build_journalist_voice(stories)
+voice_en = '\n'.join(s['summary_en'] for s in stories).strip() + '\n'
 
 headline_list_vi = '\n'.join(s['headline_vi'] for s in stories) + '\n'
 headline_list_en = '\n'.join(s['headline_en'] for s in stories) + '\n'
 caption_vi = (
     f"Bản tin Việt Nam {RUN_HOUR}: " + '; '.join(s['headline_vi'] for s in stories[:3]) + '. '
-    "Theo bạn, diễn biến nào đáng lo nhất hôm nay?"
+    "Theo bạn, đâu là diễn biến đáng chú ý nhất?"
 )
 hashtags = '#tinvietnam #tinnong #tinthoisu #vietnamnews #capnhat #tiktoknews #xuhuong'
 
@@ -574,18 +640,35 @@ for name, content in files.items():
 
 os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = '/home/minipc/keys/tts-sa.json'
 client = texttospeech.TextToSpeechClient()
-input_text = texttospeech.SynthesisInput(text=voice_vi)
 voice = texttospeech.VoiceSelectionParams(language_code='vi-VN', name='vi-VN-Neural2-A')
-audio_config = texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.LINEAR16, speaking_rate=1.2)
-response = client.synthesize_speech(input=input_text, voice=voice, audio_config=audio_config)
-audio_path = RUN_DIR / 'voice_vi.wav'
-audio_path.write_bytes(response.audio_content)
+audio_config = texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.LINEAR16, speaking_rate=1.15)
 
 probe = lambda p: float(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', str(p)]).decode().strip())
+
+story_audio_paths = []
+story_durations = []
+for idx, unit in enumerate(script_units, start=1):
+    block_input = texttospeech.SynthesisInput(text=unit['voice_block_vi'])
+    block_resp = client.synthesize_speech(input=block_input, voice=voice, audio_config=audio_config)
+    block_path = TMP_DIR / f"voice_story_{idx:02d}.wav"
+    block_path.write_bytes(block_resp.audio_content)
+    dur = probe(block_path)
+    story_audio_paths.append(block_path)
+    story_durations.append(dur)
+    unit['audio_duration_seconds'] = dur
+
+audio_concat = TMP_DIR / 'audio_concat.txt'
+with open(audio_concat, 'w', encoding='utf-8') as f:
+    for p in story_audio_paths:
+        f.write(f"file '{p}'\n")
+audio_path = RUN_DIR / 'voice_vi.wav'
+subprocess.run([
+    'ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', str(audio_concat),
+    '-c', 'copy', str(audio_path)
+], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
 audio_duration = probe(audio_path)
-seg_base = audio_duration / len(stories)
-seg_durs = [round(seg_base, 3)] * len(stories)
-seg_durs[-1] = round(audio_duration - sum(seg_durs[:-1]), 3)
+seg_durs = [round(d, 3) for d in story_durations]
 
 segment_paths = []
 for i, (story, dur) in enumerate(zip(stories, seg_durs), start=1):
