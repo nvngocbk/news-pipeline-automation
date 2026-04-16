@@ -113,6 +113,55 @@ def parse_image_from_html(text: str):
     return html.unescape(m.group(1)) if m else None
 
 
+def fetch_page(url: str) -> str:
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.read().decode('utf-8', 'ignore')
+
+
+def find_meta_content(html_text: str, attr_name: str, attr_value: str):
+    pats = [
+        rf'<meta[^>]+{attr_name}=["\']{re.escape(attr_value)}["\'][^>]+content=["\']([^"\']+)',
+        rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+{attr_name}=["\']{re.escape(attr_value)}["\']',
+    ]
+    for pat in pats:
+        m = re.search(pat, html_text, re.I)
+        if m:
+            return html.unescape(m.group(1)).strip()
+    return None
+
+
+def fetch_og_image(url: str):
+    try:
+        html_text = fetch_page(url)
+    except Exception:
+        return None
+    for attr_name, attr_value in [('property', 'og:image'), ('name', 'twitter:image')]:
+        content = find_meta_content(html_text, attr_name, attr_value)
+        if content:
+            return content
+    return None
+
+
+def probe_image_dims(path: str):
+    try:
+        out = subprocess.check_output([
+            'ffprobe', '-v', 'error', '-select_streams', 'v:0',
+            '-show_entries', 'stream=width,height', '-of', 'csv=p=0:s=x', path
+        ], text=True).strip()
+        w, h = out.split('x', 1)
+        return int(w), int(h)
+    except Exception:
+        return (0, 0)
+
+
+def download_image(url: str, out_path: Path) -> bool:
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+    with urllib.request.urlopen(req, timeout=40) as r, open(out_path, 'wb') as f:
+        f.write(r.read())
+    return out_path.exists() and out_path.stat().st_size > 0
+
+
 def tokenize(text: str):
     text = strip_html(text).lower()
     text = re.sub(r'[^\w\sàáạảãăắằẳẵặâấầẩẫậđèéẹẻẽêếềểễệìíịỉĩòóọỏõôốồổỗộơớờởỡợùúụủũưứừửữựỳýỵỷỹ]', ' ', text)
@@ -448,26 +497,42 @@ for s in stories:
 for story in stories:
     src_img_path = ''
     if story.get('image_url'):
-        ext = '.jpg'
-        if '.png' in story['image_url'].lower():
-            ext = '.png'
-        src_img_path = str(SRC_DIR / f"{story['id']}{ext}")
-        req = urllib.request.Request(story['image_url'], headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=40) as r, open(src_img_path, 'wb') as f:
-            f.write(r.read())
+        ext = '.png' if '.png' in story['image_url'].lower() else '.jpg'
+        src_img = SRC_DIR / f"{story['id']}{ext}"
+        try:
+            download_image(story['image_url'], src_img)
+            w, h = probe_image_dims(str(src_img))
+            # RSS thumbnails are often tiny; try OG image as fallback.
+            if min(w, h) < 720 and story.get('source_url'):
+                og_image = fetch_og_image(story['source_url'])
+                if og_image and og_image != story['image_url']:
+                    alt_ext = '.png' if '.png' in og_image.lower() else '.jpg'
+                    alt_img = SRC_DIR / f"{story['id']}-og{alt_ext}"
+                    try:
+                        download_image(og_image, alt_img)
+                        w2, h2 = probe_image_dims(str(alt_img))
+                        if (w2 * h2) > (w * h):
+                            src_img = alt_img
+                            story['image_url'] = og_image
+                            w, h = w2, h2
+                    except Exception:
+                        pass
+            src_img_path = str(src_img)
+            story['source_image_size'] = {'width': w, 'height': h}
+        except Exception:
+            src_img_path = ''
     story['source_image_path'] = src_img_path
     out_img = str(PREP_DIR / f"{story['id']}-vertical.jpg")
     if src_img_path and os.path.exists(src_img_path):
         cmd = [
-            'ffmpeg', '-y', '-i', src_img_path, '-filter_complex',
-            "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:10[bg];"
-            "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,unsharp=5:5:0.8:5:5:0.0[fg];"
-            "[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuvj420p",
-            '-frames:v', '1', '-q:v', '2', out_img
+            'ffmpeg', '-y', '-i', src_img_path, '-vf',
+            'scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,'
+            'crop=1080:1920,eq=contrast=1.03:saturation=1.03,unsharp=7:7:1.2:7:7:0.0,format=yuvj420p',
+            '-frames:v', '1', '-q:v', '1', out_img
         ]
         subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         story['prepared_image'] = out_img
-        story['image_processing'] = 'fit+blur'
+        story['image_processing'] = 'center-crop+lanczos+unsharp'
     else:
         story['prepared_image'] = ''
         story['image_processing'] = 'image-missing'
@@ -583,7 +648,7 @@ manifest_lines = [
     'TTS speaking rate: 1.2',
     f'Audio duration seconds: {audio_duration:.3f}',
     f'Video duration seconds: {video_duration:.3f}',
-    'Prepared images: 1080x1920 fit+blur for all stories',
+    'Prepared images: 1080x1920 center-crop + lanczos + unsharp',
     f'Anti-repeat note: {anti_repeat_note}',
 ]
 for s in stories:

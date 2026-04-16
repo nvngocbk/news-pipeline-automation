@@ -152,6 +152,18 @@ def fetch_og_image(url: str) -> str | None:
     return None
 
 
+def probe_image_dims(path: str) -> tuple[int, int]:
+    try:
+        out = subprocess.check_output([
+            'ffprobe', '-v', 'error', '-select_streams', 'v:0',
+            '-show_entries', 'stream=width,height', '-of', 'csv=p=0:s=x', path
+        ], text=True).strip()
+        w, h = out.split('x', 1)
+        return int(w), int(h)
+    except Exception:
+        return (0, 0)
+
+
 def fetch_better_summary(url: str) -> str:
     html_text = fetch_page(url)
     for attr_name, attr_value in META_DESCRIPTION_KEYS:
@@ -498,15 +510,31 @@ for s in stories:
 
 for story in stories:
     img_url = story.get('image_url')
-    ext = '.jpg'
-    if img_url and '.png' in img_url.lower():
-        ext = '.png'
+    ext = '.png' if img_url and '.png' in img_url.lower() else '.jpg'
     src_path = SRC_DIR / f"{story['id']}{ext}"
     if img_url:
         try:
             req = urllib.request.Request(img_url, headers=headers)
             with urllib.request.urlopen(req, timeout=45) as r, open(src_path, 'wb') as f:
                 f.write(r.read())
+            w, h = probe_image_dims(str(src_path))
+            if min(w, h) < 720 and story.get('source_url'):
+                og = fetch_og_image(story['source_url'])
+                if og and og != img_url:
+                    ext2 = '.png' if '.png' in og.lower() else '.jpg'
+                    alt_path = SRC_DIR / f"{story['id']}-og{ext2}"
+                    try:
+                        req2 = urllib.request.Request(og, headers=headers)
+                        with urllib.request.urlopen(req2, timeout=45) as r2, open(alt_path, 'wb') as f2:
+                            f2.write(r2.read())
+                        w2, h2 = probe_image_dims(str(alt_path))
+                        if (w2 * h2) > (w * h):
+                            src_path = alt_path
+                            story['image_url'] = og
+                            w, h = w2, h2
+                    except Exception:
+                        pass
+            story['source_image_size'] = {'width': w, 'height': h}
         except Exception:
             img_url = None
     if not img_url or not src_path.exists():
@@ -514,15 +542,14 @@ for story in stories:
     story['source_image_path'] = str(src_path)
     out_path = PREP_DIR / f"{story['id']}-vertical.jpg"
     cmd = [
-        'ffmpeg', '-y', '-i', str(src_path), '-filter_complex',
-        "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:10[bg];"
-        "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,unsharp=5:5:0.8:5:5:0.0[fg];"
-        "[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuvj420p",
-        '-frames:v', '1', '-q:v', '2', str(out_path)
+        'ffmpeg', '-y', '-i', str(src_path), '-vf',
+        'scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,'
+        'crop=1080:1920,eq=contrast=1.03:saturation=1.03,unsharp=7:7:1.2:7:7:0.0,format=yuvj420p',
+        '-frames:v', '1', '-q:v', '1', str(out_path)
     ]
     subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     story['prepared_image'] = str(out_path)
-    story['image_processing'] = 'fit+blur'
+    story['image_processing'] = 'center-crop+lanczos+unsharp'
 
 intro_templates = [
     f"Tin số 1 sáng nay có thể làm cục diện quốc tế thay đổi lúc {RUN_HOUR}.",
