@@ -552,7 +552,7 @@ def normalize_sentences(text: str):
 def build_journalist_voice(stories_local):
     lead = f"Xin kính chào quý vị. Đây là bản tin Việt Nam cập nhật lúc {RUN_HOUR}."
     lines = [lead]
-    script_units = []
+    story_units = []
     for s in stories_local:
         sentences = normalize_sentences(s.get('summary_vi') or s.get('headline_vi') or '')
         if not sentences:
@@ -563,7 +563,7 @@ def build_journalist_voice(stories_local):
         block = f"{s['headline_vi']}. {detail}".strip()
         block = re.sub(r'\s+', ' ', block)
         lines.append(block)
-        script_units.append({
+        story_units.append({
             'story_id': s['id'],
             'headline_vi': s['headline_vi'],
             'voice_block_vi': block,
@@ -571,7 +571,8 @@ def build_journalist_voice(stories_local):
         })
     outro = "Bản tin tạm dừng tại đây. Chúng tôi sẽ tiếp tục cập nhật trong các bản tin tiếp theo."
     lines.append(outro)
-    return '\n\n'.join(lines).strip() + '\n', script_units
+    full_script = '\n\n'.join(lines).strip() + '\n'
+    return full_script, lead, story_units, outro
 
 for story in stories:
     src_img_path = ''
@@ -617,7 +618,7 @@ for story in stories:
         story['prepared_image'] = ''
         story['image_processing'] = 'image-missing'
 
-voice_vi, script_units = build_journalist_voice(stories)
+voice_vi, intro_vi, story_units, outro_vi = build_journalist_voice(stories)
 voice_en = '\n'.join(s['summary_en'] for s in stories).strip() + '\n'
 
 headline_list_vi = '\n'.join(s['headline_vi'] for s in stories) + '\n'
@@ -647,21 +648,36 @@ audio_config = texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncodin
 
 probe = lambda p: float(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', str(p)]).decode().strip())
 
-story_audio_paths = []
+all_audio_paths = []
+
+intro_input = texttospeech.SynthesisInput(text=intro_vi)
+intro_resp = client.synthesize_speech(input=intro_input, voice=voice, audio_config=audio_config)
+intro_path = TMP_DIR / 'voice_intro.wav'
+intro_path.write_bytes(intro_resp.audio_content)
+intro_duration = probe(intro_path)
+all_audio_paths.append(intro_path)
+
 story_durations = []
-for idx, unit in enumerate(script_units, start=1):
+for idx, unit in enumerate(story_units, start=1):
     block_input = texttospeech.SynthesisInput(text=unit['voice_block_vi'])
     block_resp = client.synthesize_speech(input=block_input, voice=voice, audio_config=audio_config)
     block_path = TMP_DIR / f"voice_story_{idx:02d}.wav"
     block_path.write_bytes(block_resp.audio_content)
     dur = probe(block_path)
-    story_audio_paths.append(block_path)
+    all_audio_paths.append(block_path)
     story_durations.append(dur)
     unit['audio_duration_seconds'] = dur
 
+outro_input = texttospeech.SynthesisInput(text=outro_vi)
+outro_resp = client.synthesize_speech(input=outro_input, voice=voice, audio_config=audio_config)
+outro_path = TMP_DIR / 'voice_outro.wav'
+outro_path.write_bytes(outro_resp.audio_content)
+outro_duration = probe(outro_path)
+all_audio_paths.append(outro_path)
+
 audio_concat = TMP_DIR / 'audio_concat.txt'
 with open(audio_concat, 'w', encoding='utf-8') as f:
-    for p in story_audio_paths:
+    for p in all_audio_paths:
         f.write(f"file '{p}'\n")
 audio_path = RUN_DIR / 'voice_vi.wav'
 subprocess.run([
@@ -671,6 +687,9 @@ subprocess.run([
 
 audio_duration = probe(audio_path)
 seg_durs = [round(d, 3) for d in story_durations]
+if seg_durs:
+    seg_durs[0] = round(seg_durs[0] + intro_duration, 3)
+    seg_durs[-1] = round(seg_durs[-1] + outro_duration, 3)
 
 segment_paths = []
 for i, (story, dur) in enumerate(zip(stories, seg_durs), start=1):
