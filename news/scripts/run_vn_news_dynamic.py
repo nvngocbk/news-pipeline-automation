@@ -119,6 +119,14 @@ def strip_html(text: str) -> str:
     return re.sub(r'\s+', ' ', html.unescape(re.sub(r'<[^>]+>', ' ', text or ''))).strip()
 
 
+def clean_headline_text(text: str) -> str:
+    text = strip_html(text)
+    text = text.replace('“', '"').replace('”', '"').replace('’', "'").replace('‘', "'")
+    text = re.sub(r'\s+([,.;:!?])', r'\1', text)
+    text = re.sub(r'\s{2,}', ' ', text)
+    return text.strip()
+
+
 def parse_image_from_html(text: str):
     if not text:
         return None
@@ -235,7 +243,7 @@ def category_from_text(title: str, desc: str):
 
 
 def normalize_story(entry, idx):
-    title_vi = strip_html(entry['title'])
+    title_vi = clean_headline_text(entry['title'])
     desc_vi = strip_html(entry.get('description', ''))
     if not desc_vi:
         desc_vi = title_vi
