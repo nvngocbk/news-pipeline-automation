@@ -33,15 +33,17 @@ HISTORY_PATH = Path('/home/minipc/.openclaw/workspace/news-vn-history.jsonl')
 HISTORY_MAX_LINES = int(os.environ.get('HISTORY_MAX_LINES', '1500'))
 
 FEEDS = [
-    ('VnExpress', 'https://vnexpress.net/rss/tin-moi-nhat.rss'),
+    # Desk-specific hard-news feeds first so dedup-by-link prefers them
     ('VnExpress-Thời sự', 'https://vnexpress.net/rss/thoi-su.rss'),
-    ('Tuổi Trẻ', 'https://tuoitre.vn/rss/tin-moi-nhat.rss'),
     ('Tuổi Trẻ-Thời sự', 'https://tuoitre.vn/rss/thoi-su.rss'),
-    ('VietnamNet', 'https://vietnamnet.vn/rss/home.rss'),
     ('VietnamNet-Thời sự', 'https://vietnamnet.vn/rss/thoi-su.rss'),
-    ('Dân Trí', 'https://dantri.com.vn/rss/home.rss'),
     ('Dân Trí-Xã hội', 'https://dantri.com.vn/rss/xa-hoi.rss'),
     ('VietnamPlus', 'https://www.vietnamplus.vn/rss/tin-moi-nhat.rss'),
+    # Firehose feeds last — used only to fill gaps after desk feeds
+    ('VnExpress', 'https://vnexpress.net/rss/tin-moi-nhat.rss'),
+    ('Tuổi Trẻ', 'https://tuoitre.vn/rss/tin-moi-nhat.rss'),
+    ('VietnamNet', 'https://vietnamnet.vn/rss/home.rss'),
+    ('Dân Trí', 'https://dantri.com.vn/rss/home.rss'),
 ]
 
 FOCUS_FEEDS = [
@@ -62,7 +64,13 @@ BLACKLIST_KEYWORDS = {
     'onsen', 'ecopark', 'khuyến mãi', 'ưu đãi', 'mỹ phẩm', 'làm đẹp', 'da lão hóa', 'quán cà phê',
     'bắt cá', 'hái nho', 'forest onsen', 'du lịch', 'giải trí', 'showbiz', 'hoa hậu', 'bóng đá',
     'xe máy điện', 'cà phê vườn', 'ung thư vú', 'bác sĩ chỉ ra', 'thói quen', 'sản phẩm',
-    'mẹo vặt', 'bí quyết', 'cách làm', 'review', 'trải nghiệm', 'giảm cân', 'detox', 'làm giàu nhanh'
+    'mẹo vặt', 'bí quyết', 'cách làm', 'review', 'trải nghiệm', 'giảm cân', 'detox', 'làm giàu nhanh',
+    'tử vi', 'cung hoàng đạo', 'phong thủy', 'bói', 'soi kèo', 'nhận định bóng đá',
+    'esports', 'livestream', 'fan hâm mộ', 'xe sang', 'siêu xe', 'concept car',
+    'top 5', 'top 10', 'top 3', 'điểm danh', 'gợi ý món', 'thực đơn',
+    'công thức', 'chăm sóc da', 'giữ dáng', 'drama', 'tin đồn', 'lộ ảnh',
+    'street style', 'diện đồ', 'mặc gì', 'trailer', 'teaser', 'mv mới',
+    'khai trương', 'ra mắt dự án', 'ra mắt sản phẩm',
 }
 
 VIRAL_KEYWORDS = {
@@ -87,6 +95,23 @@ HOT_NEWS_KEYWORDS = {
     'tai nạn', 'cháy', 'nổ', 'thương vong', 'cảnh báo', 'khẩn cấp', 'dịch', 'ngộ độc', 'thu hồi',
     'tăng giá', 'siết', 'đình chỉ', 'xử phạt', 'cấm', 'đấu thầu', 'bất thường', 'áp thấp', 'bão', 'ngập'
 }
+
+URL_PATH_BLOCKLIST = (
+    '/giai-tri/', '/the-thao/', '/bong-da/', '/doi-song/', '/am-thuc/',
+    '/du-lich/', '/lam-dep/', '/thoi-trang/', '/xe/', '/oto-xemay/', '/oto/',
+    '/showbiz/', '/nhip-song-tre/', '/song-khoe/', '/tinh-yeu-gioi-tinh/',
+    '/goc-nhin/', '/tam-su/', '/cuoi/', '/esport/', '/game/', '/tu-van/',
+    '/phim/', '/nhac/', '/sao/', '/ngoi-sao/', '/blog/', '/cam-nang/',
+    '/the-gioi/',  # VN pipeline excludes world — covered by world pipeline
+)
+
+
+def is_quality_url(url: str) -> bool:
+    if not url:
+        return True
+    lowered = url.lower()
+    return not any(bad in lowered for bad in URL_PATH_BLOCKLIST)
+
 
 CATEGORY_PRIORITY = {
     'chính trị': 3,
@@ -243,6 +268,9 @@ def category_from_text(title: str, desc: str):
 
 
 def normalize_story(entry, idx):
+    link = entry.get('link', '') or ''
+    if not is_quality_url(link):
+        return None
     title_vi = clean_headline_text(entry['title'])
     desc_vi = strip_html(entry.get('description', ''))
     if not desc_vi:
@@ -254,7 +282,7 @@ def normalize_story(entry, idx):
     if any(bad in lowered for bad in BLACKLIST_KEYWORDS):
         return None
     if desc_vi == title_vi:
-        summary_vi = f"{title_vi}. Đây là diễn biến đáng chú ý cần tiếp tục theo dõi trong bản tin cập nhật lúc {RUN_HOUR}."
+        summary_vi = title_vi
     else:
         summary_vi = desc_vi
         if not summary_vi.endswith(('.', '!', '?')):
@@ -328,13 +356,26 @@ def parse_history_runs():
             run_key = data.get('run_key') or f"{data.get('run_date', '')}-{data.get('run_hhmm', '')}"
             if not run_key or run_key == CURRENT_RUN_KEY:
                 continue
-            ts_str = data.get('timestamp') or data.get('run_timestamp')
+            ts_str = data.get('run_timestamp') or data.get('timestamp') or ''
             ts_dt = None
             if ts_str:
                 try:
                     ts_dt = datetime.fromisoformat(ts_str)
                 except Exception:
                     ts_dt = None
+            # Fallback: reconstruct from run_date + run_hhmm (handles legacy
+            # "2026-04-22 14:30 Asia/Bangkok" timestamps that fromisoformat
+            # cannot parse because of the trailing IANA tz name).
+            if ts_dt is None:
+                rd = data.get('run_date') or ''
+                rh = data.get('run_hhmm') or ''
+                if rd and len(rh) == 4:
+                    try:
+                        ts_dt = datetime.strptime(f'{rd} {rh}', '%Y-%m-%d %H%M').replace(
+                            tzinfo=runtime.now.tzinfo
+                        )
+                    except Exception:
+                        ts_dt = None
             if ts_dt is None:
                 continue
             run_entries.setdefault(run_key, []).append(data)
@@ -403,10 +444,10 @@ def pick_stories(pool):
         text = candidate['headline_vi'] + ' ' + candidate['summary_vi']
         return (
             focus_score(candidate),
-            hot_score(text),              # prioritize hotness first
+            priority_score(candidate),    # chính trị/kinh tế/xã hội ưu tiên trước
+            hot_score(text),              # rồi tới độ nóng
+            recency_score(candidate),     # rồi độ mới
             viral_score(text),
-            recency_score(candidate),     # then freshness
-            priority_score(candidate),
             len(candidate['tokens']),
         )
 
@@ -415,7 +456,14 @@ def pick_stories(pool):
     selected = []
     used_links = set()
     used_categories = set()
+    used_token_sets = []  # per-selected token sets, for intra-run cluster dedup
     duplicate_pool = []
+
+    CLUSTER_OVERLAP = 4  # tokens shared ⇒ same topic cluster
+
+    def clashes_with_selected(candidate):
+        cand_set = set(candidate['tokens'])
+        return any(len(cand_set & used) >= CLUSTER_OVERLAP for used in used_token_sets)
 
     for candidate in ranked_pool:
         if candidate['source_url'] in used_links:
@@ -438,6 +486,10 @@ def pick_stories(pool):
         if overlap >= 5 and fs == 0 and hs < 2:
             continue
 
+        # Same topic cluster as an already-selected story in this run.
+        if clashes_with_selected(candidate):
+            continue
+
         # Allow repeated category when story is hot enough.
         already_used_category = candidate['category'] in used_categories
         if already_used_category and hs < 2 and len(selected) < TARGET_STORIES - 1:
@@ -450,6 +502,7 @@ def pick_stories(pool):
         selected.append(candidate)
         used_links.add(candidate['source_url'])
         used_categories.add(candidate['category'])
+        used_token_sets.append(set(candidate['tokens']))
         if len(selected) == TARGET_STORIES:
             break
 
@@ -462,8 +515,11 @@ def pick_stories(pool):
             text = candidate['headline_vi'] + ' ' + candidate['summary_vi']
             if is_soft_news(text):
                 continue
+            if clashes_with_selected(candidate):
+                continue
             selected.append(candidate)
             used_links.add(candidate['source_url'])
+            used_token_sets.append(set(candidate['tokens']))
             if len(selected) == TARGET_STORIES:
                 break
 
@@ -473,12 +529,16 @@ def pick_stories(pool):
                 continue
             if not candidate.get('image_url'):
                 continue
+            if clashes_with_selected(candidate):
+                continue
             selected.append(candidate)
             used_links.add(candidate['source_url'])
+            used_token_sets.append(set(candidate['tokens']))
             if len(selected) == TARGET_STORIES:
                 break
 
-    # enforce at least 3/5 hot headlines when possible
+    # enforce at least 3 hot headlines when possible, without violating
+    # intra-run cluster dedup (rule 4 in NEWS_PIPELINE_RULES.md).
     hot_count = sum(1 for s in selected if hot_score(s['headline_vi'] + ' ' + s['summary_vi']) > 0)
     if hot_count < 3:
         hot_pool = [
@@ -500,10 +560,16 @@ def pick_stories(pool):
             victim_hot = hot_score(victim['headline_vi'] + ' ' + victim['summary_vi'])
             if victim_hot >= hot_score(hot_candidate['headline_vi'] + ' ' + hot_candidate['summary_vi']):
                 continue
+            # Check cluster dedup against the non-victim selected stories.
+            remaining_tokens = [set(s['tokens']) for s in selected if s is not victim]
+            cand_set = set(hot_candidate['tokens'])
+            if any(len(cand_set & t) >= CLUSTER_OVERLAP for t in remaining_tokens):
+                continue
             selected.remove(victim)
             used_links.discard(victim['source_url'])
             selected.append(hot_candidate)
             used_links.add(hot_candidate['source_url'])
+            used_token_sets[:] = [set(s['tokens']) for s in selected]
             hot_count = sum(1 for s in selected if hot_score(s['headline_vi'] + ' ' + s['summary_vi']) > 0)
             if hot_count >= 3:
                 break
@@ -562,20 +628,35 @@ def build_journalist_voice(stories_local):
     lines = [lead]
     story_units = []
     for s in stories_local:
-        sentences = normalize_sentences(s.get('summary_vi') or s.get('headline_vi') or '')
-        if not sentences:
-            sentences = [s['headline_vi']]
-        detail = ' '.join(sentences[:2]).strip()
-        if detail and not detail.endswith(('.', '!', '?')):
-            detail += '.'
-        block = f"{s['headline_vi']}. {detail}".strip()
+        headline = (s.get('headline_vi') or '').strip()
+        summary = (s.get('summary_vi') or '').strip()
+        headline_norm = headline.rstrip('.!?').strip().lower()
+        summary_norm = summary.rstrip('.!?').strip().lower()
+        if not summary or summary_norm == headline_norm:
+            # No extra detail beyond headline — speak it once.
+            block = headline if headline.endswith(('.', '!', '?')) else headline + '.'
+            sentence_count = 1
+        else:
+            sentences = normalize_sentences(summary)
+            # Skip a leading sentence that duplicates the headline.
+            if sentences and sentences[0].rstrip('.!?').strip().lower() == headline_norm:
+                sentences = sentences[1:]
+            detail = ' '.join(sentences[:2]).strip()
+            if detail and not detail.endswith(('.', '!', '?')):
+                detail += '.'
+            if detail:
+                block = f"{headline}. {detail}".strip()
+                sentence_count = len(sentences[:2]) + 1
+            else:
+                block = headline if headline.endswith(('.', '!', '?')) else headline + '.'
+                sentence_count = 1
         block = re.sub(r'\s+', ' ', block)
         lines.append(block)
         story_units.append({
             'story_id': s['id'],
-            'headline_vi': s['headline_vi'],
+            'headline_vi': headline,
             'voice_block_vi': block,
-            'sentence_count': len(sentences[:2]) + 1,
+            'sentence_count': sentence_count,
         })
     outro = "Bản tin tạm dừng tại đây. Chúng tôi sẽ tiếp tục cập nhật trong các bản tin tiếp theo."
     lines.append(outro)
@@ -803,6 +884,7 @@ def update_history(stories):
     for story in stories:
         entry = {
             'timestamp': runtime.iso_local,
+            'run_timestamp': runtime.now.isoformat(),
             'run_date': RUN_DATE,
             'run_hhmm': RUN_HHMM,
             'run_key': CURRENT_RUN_KEY,
@@ -810,6 +892,7 @@ def update_history(stories):
             'summary_vi': story['summary_vi'],
             'source_url': story.get('source_url', ''),
             'category': story.get('category', ''),
+            'tokens': story.get('tokens', [])[:20],
         }
         entries.append(json.dumps(entry, ensure_ascii=False))
     if len(entries) > HISTORY_MAX_LINES:
