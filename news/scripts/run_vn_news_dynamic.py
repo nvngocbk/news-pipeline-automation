@@ -105,6 +105,41 @@ URL_PATH_BLOCKLIST = (
     '/the-gioi/',  # VN pipeline excludes world — covered by world pipeline
 )
 
+# Event tokens for cluster-signature anti-repeat. Ordered roughly by specificity
+# (concrete incidents first, broader policy/economic signals last) so
+# extract_event_keyword returns the most incident-like token when multiple match.
+CLUSTER_EVENT_KEYWORDS = (
+    'cháy', 'nổ', 'tai nạn', 'thương vong', 'chìm', 'sập', 'đâm',
+    'bắt', 'khởi tố', 'truy nã', 'triệt phá', 'điều tra', 'xét xử', 'tuyên án',
+    'lừa đảo', 'tham nhũng', 'đấu thầu', 'đình chỉ', 'xử phạt',
+    'ngộ độc', 'thu hồi', 'dịch', 'áp thấp', 'bão', 'ngập',
+    'cảnh báo', 'khẩn cấp', 'tăng giá', 'giảm giá', 'siết', 'cấm',
+)
+
+# Place/entity names too broad to serve as a cluster key on their own. If a
+# headline mentions only these, we fall back to token-overlap instead of
+# cluster-signature (avoids blocking unrelated events in the same major city).
+CLUSTER_NOUN_BLOCKLIST = {
+    'hà nội', 'tp hcm', 'tp hồ chí minh', 'hồ chí minh', 'tp. hcm',
+    'việt nam', 'đà nẵng', 'hải phòng', 'cần thơ',
+    'miền bắc', 'miền trung', 'miền nam',
+}
+
+_VN_CAP_CHARS = (
+    'A-Z'
+    'ÀÁẠẢÃĂẮẰẲẴẶÂẤẦẨẪẬ'
+    'Đ'
+    'ÈÉẸẺẼÊẾỀỂỄỆ'
+    'ÌÍỊỈĨ'
+    'ÒÓỌỎÕÔỐỒỔỖỘƠỚỜỞỠỢ'
+    'ÙÚỤỦŨƯỨỪỬỮỰ'
+    'ỲÝỴỶỸ'
+)
+_PROPER_NOUN_RE = re.compile(
+    rf'[{_VN_CAP_CHARS}]\w*(?:\s+[{_VN_CAP_CHARS}]\w*)+',
+    re.UNICODE,
+)
+
 
 def is_quality_url(url: str) -> bool:
     if not url:
@@ -125,13 +160,19 @@ CATEGORY_PRIORITY = {
     'khác': 0,
 }
 
-PRIOR_FILES_TO_SCAN = int(os.environ.get('PRIOR_FILES_TO_SCAN', '3'))
+PRIOR_FILES_TO_SCAN = int(os.environ.get('PRIOR_FILES_TO_SCAN', '50'))
 ROLLING_HOURS = int(os.environ.get('ROLLING_HOURS', '24'))
 TARGET_STORIES = int(os.environ.get('TARGET_STORIES', '8'))
 TARGET_STORIES = max(8, min(10, TARGET_STORIES))
 FOCUS_KEYWORDS = [x.strip().lower() for x in os.environ.get('FOCUS_KEYWORDS', '').split('|') if x.strip()]
 INCLUDE_YESTERDAY = os.environ.get('INCLUDE_YESTERDAY', '0') == '1'
 MIN_FOCUS_MATCHES = int(os.environ.get('MIN_FOCUS_MATCHES', str(max(3, TARGET_STORIES // 2))))
+# Hard absolute age cap: an incident's pub_date older than this is never picked
+# regardless of hot_score, unless it matches FOCUS_KEYWORDS.
+MAX_STORY_AGE_HOURS = int(os.environ.get('MAX_STORY_AGE_HOURS', '36'))
+# Cluster-signature window runs wider than the token window so follow-up
+# coverage of a weeks-old incident can still be caught.
+CLUSTER_ROLLING_HOURS = int(os.environ.get('CLUSTER_ROLLING_HOURS', '168'))
 
 
 def fetch(url: str) -> str:
@@ -267,6 +308,64 @@ def category_from_text(title: str, desc: str):
     return 'khác'
 
 
+def extract_proper_nouns(text: str):
+    # Matches sequences of 2+ consecutive capitalized words (Vietnamese or
+    # ASCII caps). Single sentence-start capitals are intentionally skipped
+    # — they carry too little signal and create false cluster matches.
+    #
+    # Splitting on sentence-ending punctuation first prevents a run-on like
+    # "…Vĩnh Tuy. Vụ cháy…" from being matched as the 3-word phrase
+    # "Vĩnh Tuy Vụ". After the match, any embedded broad-location noun
+    # ("hà nội", "tp hcm", …) is stripped so "TP Đà Nẵng" collapses to "tp"
+    # (then rejected as too short to serve as a cluster signal).
+    if not text:
+        return []
+    results = []
+    for sentence in re.split(r'[.!?;:]+|\n+', text):
+        for m in _PROPER_NOUN_RE.finditer(sentence):
+            raw = re.sub(r'\s+', ' ', m.group(0).replace('.', ' ').strip()).lower()
+            if not raw:
+                continue
+            cleaned = raw
+            for bad in CLUSTER_NOUN_BLOCKLIST:
+                cleaned = re.sub(rf'(?:^|\s){re.escape(bad)}(?=\s|$)', ' ', cleaned)
+            cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+            words = cleaned.split()
+            if len(words) < 2 or not any(len(w) >= 3 for w in words):
+                continue
+            if cleaned not in results:
+                results.append(cleaned)
+    return results
+
+
+def extract_event_keyword(text: str) -> str:
+    lowered = (text or '').lower()
+    for kw in CLUSTER_EVENT_KEYWORDS:
+        if kw in lowered:
+            return kw
+    return ''
+
+
+def compute_cluster_keys(title: str, summary: str):
+    # A cluster key is `<proper-noun>@<event>`. We require BOTH parts: a bare
+    # proper noun (e.g. "Vĩnh Tuy") without an event word matches too much;
+    # a bare event ("cháy") matches unrelated incidents. Multiple keys per
+    # story let a follow-up article with an extra noun still match the
+    # original ({vĩnh tuy@cháy} ⊂ {hà nội@cháy, vĩnh tuy@cháy}).
+    # The explicit ". " between title and summary ensures extract_proper_nouns
+    # treats them as separate sentences instead of a run-on phrase.
+    t = (title or '').strip()
+    s = (summary or '').strip()
+    if t and t[-1] not in '.!?':
+        t = t + '.'
+    text = f'{t} {s}'.strip()
+    nouns = extract_proper_nouns(text)
+    event = extract_event_keyword(text)
+    if not nouns or not event:
+        return []
+    return [f'{n}@{event}' for n in nouns[:3]]
+
+
 def normalize_story(entry, idx):
     link = entry.get('link', '') or ''
     if not is_quality_url(link):
@@ -304,6 +403,7 @@ def normalize_story(entry, idx):
         'pub_dt': pub_dt,
         'category': category_from_text(title_vi, summary_vi),
         'tokens': tokenize(title_vi + ' ' + summary_vi),
+        'cluster_keys': compute_cluster_keys(title_vi, summary_vi),
     }
 
 
@@ -391,34 +491,58 @@ def parse_history_runs():
 
 
 def load_prior_headlines():
+    # Two windows share one scan of the history file:
+    #   - token window (ROLLING_HOURS, default 24h): for overlap-count anti-repeat
+    #   - cluster window (CLUSTER_ROLLING_HOURS, default 168h): catches follow-up
+    #     coverage of incidents that broke days earlier.
+    # PRIOR_FILES_TO_SCAN caps the outer walk so we don't read the whole
+    # rolling JSONL when the cluster window runs wide.
     prior_tokens = set()
     prior_categories = set()
     prior_links = set()
-    scanned = 0
-    cutoff = runtime.now - timedelta(hours=ROLLING_HOURS)
+    prior_clusters = set()
+    scanned_tokens = 0
+    scanned_clusters = 0
+    token_cutoff = runtime.now - timedelta(hours=ROLLING_HOURS)
+    cluster_cutoff = runtime.now - timedelta(hours=CLUSTER_ROLLING_HOURS)
 
     for ts, run_key, entries in parse_history_runs():
         if ts >= runtime.now:
             continue
-        if ts < cutoff:
+        if ts < cluster_cutoff:
             break
-        scanned += 1
+        within_tokens = ts >= token_cutoff
+        within_clusters = ts >= cluster_cutoff
+        if within_tokens:
+            scanned_tokens += 1
+        if within_clusters:
+            scanned_clusters += 1
         for story in entries:
             title = story.get('headline_vi') or ''
             summary = story.get('summary_vi') or ''
-            prior_tokens.update(tokenize(title + ' ' + summary))
-            category = story.get('category') or category_from_text(title, summary)
-            prior_categories.add(category)
-            source_url = story.get('source_url') or ''
-            if source_url:
-                prior_links.add(source_url)
-        if scanned >= PRIOR_FILES_TO_SCAN:
+            if within_clusters:
+                # Legacy history rows (pre-cluster) won't have cluster_keys —
+                # derive on the fly so the week-old backfill still filters.
+                keys = story.get('cluster_keys')
+                if not keys:
+                    keys = compute_cluster_keys(title, summary)
+                for key in keys:
+                    if key:
+                        prior_clusters.add(key)
+            if within_tokens:
+                prior_tokens.update(tokenize(title + ' ' + summary))
+                category = story.get('category') or category_from_text(title, summary)
+                prior_categories.add(category)
+                source_url = story.get('source_url') or ''
+                if source_url:
+                    prior_links.add(source_url)
+        if scanned_clusters >= PRIOR_FILES_TO_SCAN:
             break
-    return prior_tokens, prior_categories, prior_links, scanned
+    return prior_tokens, prior_categories, prior_links, prior_clusters, scanned_tokens, scanned_clusters
 
 
 def pick_stories(pool):
-    prior_tokens, prior_categories, prior_links, scanned = load_prior_headlines()
+    prior_tokens, prior_categories, prior_links, prior_clusters, scanned_tokens, scanned_clusters = load_prior_headlines()
 
     def focus_score(candidate):
         if not FOCUS_KEYWORDS:
@@ -440,6 +564,16 @@ def pick_stories(pool):
         delta = (runtime.now - pub_dt).total_seconds() / 3600
         return max(0, 24 - delta)
 
+    def story_age_hours(candidate):
+        pub_dt = candidate.get('pub_dt')
+        if not pub_dt:
+            return None
+        if pub_dt.tzinfo is None:
+            pub_dt = pub_dt.replace(tzinfo=runtime.now.tzinfo)
+        else:
+            pub_dt = pub_dt.astimezone(runtime.now.tzinfo)
+        return (runtime.now - pub_dt).total_seconds() / 3600
+
     def final_rank(candidate):
         text = candidate['headline_vi'] + ' ' + candidate['summary_vi']
         return (
@@ -451,7 +585,22 @@ def pick_stories(pool):
             len(candidate['tokens']),
         )
 
+    def in_prior_cluster(candidate):
+        keys = candidate.get('cluster_keys') or []
+        return any(k in prior_clusters for k in keys)
+
     ranked_pool = sorted(pool, key=final_rank, reverse=True)
+
+    # Hard absolute age cap for main pass. Hot stories (cháy, nổ, bắt…) used to
+    # ride through recency_score because the old gate only dropped when hs==0;
+    # that let week-old incidents resurface via follow-up coverage. Bypass only
+    # for explicit FOCUS_KEYWORDS matches.
+    fresh_pool = []
+    for c in ranked_pool:
+        age_h = story_age_hours(c)
+        if age_h is not None and age_h > MAX_STORY_AGE_HOURS and focus_score(c) == 0:
+            continue
+        fresh_pool.append(c)
 
     selected = []
     used_links = set()
@@ -465,7 +614,7 @@ def pick_stories(pool):
         cand_set = set(candidate['tokens'])
         return any(len(cand_set & used) >= CLUSTER_OVERLAP for used in used_token_sets)
 
-    for candidate in ranked_pool:
+    for candidate in fresh_pool:
         if candidate['source_url'] in used_links:
             continue
         if not candidate.get('image_url'):
@@ -473,6 +622,11 @@ def pick_stories(pool):
 
         text = candidate['headline_vi'] + ' ' + candidate['summary_vi']
         if is_soft_news(text):
+            continue
+
+        # Cluster-signature anti-repeat — hard drop, no hot bypass. Catches
+        # follow-up articles about an incident that broke days earlier.
+        if in_prior_cluster(candidate):
             continue
 
         if candidate['source_url'] in prior_links:
@@ -483,7 +637,9 @@ def pick_stories(pool):
         fs = focus_score(candidate)
         hs = hot_score(text)
 
-        if overlap >= 5 and fs == 0 and hs < 2:
+        # No hot-story bypass here: a high hot_score must not override the
+        # topic-repeat signal (that was the original fire-story regression).
+        if overlap >= 5 and fs == 0:
             continue
 
         # Same topic cluster as an already-selected story in this run.
@@ -506,6 +662,9 @@ def pick_stories(pool):
         if len(selected) == TARGET_STORIES:
             break
 
+    # Fallback 1: relax age + token-overlap rules, but cluster check and
+    # soft-news filter still apply. A week-old incident cluster never sneaks
+    # in even when the main pass undersubscribed.
     if len(selected) < TARGET_STORIES:
         for candidate in ranked_pool:
             if candidate['source_url'] in used_links:
@@ -515,6 +674,8 @@ def pick_stories(pool):
             text = candidate['headline_vi'] + ' ' + candidate['summary_vi']
             if is_soft_news(text):
                 continue
+            if in_prior_cluster(candidate):
+                continue
             if clashes_with_selected(candidate):
                 continue
             selected.append(candidate)
@@ -523,12 +684,16 @@ def pick_stories(pool):
             if len(selected) == TARGET_STORIES:
                 break
 
+    # Fallback 2: URLs we saw in prior runs (within token window). Still gated
+    # by cluster check so we don't literally re-air the same incident.
     if len(selected) < TARGET_STORIES:
         for candidate in duplicate_pool:
             if candidate['source_url'] in used_links:
                 continue
             if not candidate.get('image_url'):
                 continue
+            if in_prior_cluster(candidate):
+                continue
             if clashes_with_selected(candidate):
                 continue
             selected.append(candidate)
@@ -537,16 +702,20 @@ def pick_stories(pool):
             if len(selected) == TARGET_STORIES:
                 break
 
-    # enforce at least 3 hot headlines when possible, without violating
-    # intra-run cluster dedup (rule 4 in NEWS_PIPELINE_RULES.md).
+    # Enforce at least 3 hot headlines when possible, without violating
+    # intra-run cluster dedup (rule 4 in NEWS_PIPELINE_RULES.md). Rescue pool
+    # draws from fresh_pool (age-capped) and excludes prior-cluster topics so
+    # a stale hot incident can't be rescued back in.
     hot_count = sum(1 for s in selected if hot_score(s['headline_vi'] + ' ' + s['summary_vi']) > 0)
     if hot_count < 3:
         hot_pool = [
-            c for c in ranked_pool
+            c for c in fresh_pool
             if c['source_url'] not in used_links
             and c.get('image_url')
             and hot_score(c['headline_vi'] + ' ' + c['summary_vi']) > 0
             and not is_soft_news(c['headline_vi'] + ' ' + c['summary_vi'])
+            and not in_prior_cluster(c)
+            and len(set(c['tokens']) & prior_tokens) < 5
         ]
         for hot_candidate in hot_pool:
             # replace the least-hot selected item
@@ -575,7 +744,7 @@ def pick_stories(pool):
                 break
 
     selected = sorted(selected, key=final_rank, reverse=True)[:TARGET_STORIES]
-    return selected, prior_categories, prior_links, scanned
+    return selected, prior_categories, prior_links, prior_clusters, scanned_tokens, scanned_clusters
 
 
 
@@ -601,7 +770,7 @@ for idx, entry in enumerate(raw_entries, start=1):
         continue
     pool.append(story)
 
-stories, prior_categories, prior_links, prior_scanned = pick_stories(pool)
+stories, prior_categories, prior_links, prior_clusters, prior_scanned_tokens, prior_scanned_clusters = pick_stories(pool)
 if len(stories) < TARGET_STORIES:
     raise RuntimeError(f'Not enough dynamic VN stories gathered. feeds={len(raw_entries)} selected={len(stories)} errors={feed_errors}')
 
@@ -809,9 +978,11 @@ anti_repeat_note = (
     'Dynamic RSS sourcing enabled. '
     + (
         f"Prior categories avoided where possible: {', '.join(sorted(prior_categories))}. "
-        f"Rolling window: last {ROLLING_HOURS}h, runs scanned: {prior_scanned}, prior links: {len(prior_links)}."
-        if prior_scanned else
-        f"No recent metadata found in last {ROLLING_HOURS}h for anti-repeat comparison."
+        f"Token window: last {ROLLING_HOURS}h, runs scanned: {prior_scanned_tokens}, prior links: {len(prior_links)}. "
+        f"Cluster window: last {CLUSTER_ROLLING_HOURS}h, runs scanned: {prior_scanned_clusters}, prior clusters: {len(prior_clusters)}. "
+        f"Max story age: {MAX_STORY_AGE_HOURS}h."
+        if prior_scanned_clusters else
+        f"No recent metadata found in last {CLUSTER_ROLLING_HOURS}h for anti-repeat comparison."
     )
 )
 
@@ -892,7 +1063,8 @@ def update_history(stories):
             'summary_vi': story['summary_vi'],
             'source_url': story.get('source_url', ''),
             'category': story.get('category', ''),
-            'tokens': story.get('tokens', [])[:20],
+            'cluster_keys': story.get('cluster_keys', []),
+            'tokens': story.get('tokens', []),
         }
         entries.append(json.dumps(entry, ensure_ascii=False))
     if len(entries) > HISTORY_MAX_LINES:
