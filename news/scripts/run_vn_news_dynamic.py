@@ -173,6 +173,11 @@ MAX_STORY_AGE_HOURS = int(os.environ.get('MAX_STORY_AGE_HOURS', '36'))
 # Cluster-signature window runs wider than the token window so follow-up
 # coverage of a weeks-old incident can still be caught.
 CLUSTER_ROLLING_HOURS = int(os.environ.get('CLUSTER_ROLLING_HOURS', '168'))
+# Headline-set Jaccard threshold: candidate's headline tokens vs each prior
+# headline (within cluster window). Catches institutional/policy headlines
+# (e.g. "Thủ tướng: …") that yield no cluster_keys but still re-air with
+# essentially the same wording across days. 1.0 disables the check.
+HEADLINE_JACCARD_BLOCK = float(os.environ.get('HEADLINE_JACCARD_BLOCK', '0.6'))
 
 
 def fetch(url: str) -> str:
@@ -346,6 +351,10 @@ def extract_event_keyword(text: str) -> str:
     return ''
 
 
+def headline_token_set(headline: str) -> frozenset:
+    return frozenset(tokenize(headline or ''))
+
+
 def compute_cluster_keys(title: str, summary: str):
     # A cluster key is `<proper-noun>@<event>`. We require BOTH parts: a bare
     # proper noun (e.g. "Vĩnh Tuy") without an event word matches too much;
@@ -501,6 +510,7 @@ def load_prior_headlines():
     prior_categories = set()
     prior_links = set()
     prior_clusters = set()
+    prior_headline_sets = []  # list[frozenset] within cluster window
     scanned_tokens = 0
     scanned_clusters = 0
     token_cutoff = runtime.now - timedelta(hours=ROLLING_HOURS)
@@ -529,6 +539,11 @@ def load_prior_headlines():
                 for key in keys:
                     if key:
                         prior_clusters.add(key)
+                # Headline-set signature: catches re-airings of institutional
+                # speeches/policy stories that don't yield cluster_keys.
+                hs_set = headline_token_set(title)
+                if hs_set:
+                    prior_headline_sets.append(hs_set)
             if within_tokens:
                 prior_tokens.update(tokenize(title + ' ' + summary))
                 category = story.get('category') or category_from_text(title, summary)
@@ -538,11 +553,17 @@ def load_prior_headlines():
                     prior_links.add(source_url)
         if scanned_clusters >= PRIOR_FILES_TO_SCAN:
             break
-    return prior_tokens, prior_categories, prior_links, prior_clusters, scanned_tokens, scanned_clusters
+    return (
+        prior_tokens, prior_categories, prior_links, prior_clusters,
+        prior_headline_sets, scanned_tokens, scanned_clusters,
+    )
 
 
 def pick_stories(pool):
-    prior_tokens, prior_categories, prior_links, prior_clusters, scanned_tokens, scanned_clusters = load_prior_headlines()
+    (
+        prior_tokens, prior_categories, prior_links, prior_clusters,
+        prior_headline_sets, scanned_tokens, scanned_clusters,
+    ) = load_prior_headlines()
 
     def focus_score(candidate):
         if not FOCUS_KEYWORDS:
@@ -589,6 +610,29 @@ def pick_stories(pool):
         keys = candidate.get('cluster_keys') or []
         return any(k in prior_clusters for k in keys)
 
+    def headline_clashes_prior(candidate):
+        # Headline-set Jaccard against each prior headline (within 168h).
+        # Catches institutional/speech stories like "Thủ tướng: Tiếng nói
+        # Việt Nam vang xa…" that yield no cluster_keys (no 2-word proper
+        # noun + no event word) but re-air with the same wording across
+        # multiple days. Exact-set match always blocks; otherwise apply
+        # the configured Jaccard threshold.
+        if HEADLINE_JACCARD_BLOCK >= 1.0 or not prior_headline_sets:
+            return False
+        cand = headline_token_set(candidate.get('headline_vi', ''))
+        if not cand:
+            return False
+        for prior in prior_headline_sets:
+            if cand == prior:
+                return True
+            inter = len(cand & prior)
+            if not inter:
+                continue
+            union = len(cand | prior)
+            if union and inter / union >= HEADLINE_JACCARD_BLOCK:
+                return True
+        return False
+
     ranked_pool = sorted(pool, key=final_rank, reverse=True)
 
     # Hard absolute age cap for main pass. Hot stories (cháy, nổ, bắt…) used to
@@ -629,6 +673,12 @@ def pick_stories(pool):
         if in_prior_cluster(candidate):
             continue
 
+        # Headline-set Jaccard anti-repeat — catches institutional/policy
+        # re-airings (no cluster_keys → cluster check is silent for them).
+        # Focus_keywords override: explicit user request beats anti-repeat.
+        if headline_clashes_prior(candidate) and focus_score(candidate) == 0:
+            continue
+
         if candidate['source_url'] in prior_links:
             duplicate_pool.append(candidate)
             continue
@@ -662,9 +712,9 @@ def pick_stories(pool):
         if len(selected) == TARGET_STORIES:
             break
 
-    # Fallback 1: relax age + token-overlap rules, but cluster check and
-    # soft-news filter still apply. A week-old incident cluster never sneaks
-    # in even when the main pass undersubscribed.
+    # Fallback 1: relax age + token-overlap rules, but cluster check, headline
+    # check and soft-news filter still apply. A week-old incident cluster
+    # never sneaks in even when the main pass undersubscribed.
     if len(selected) < TARGET_STORIES:
         for candidate in ranked_pool:
             if candidate['source_url'] in used_links:
@@ -676,6 +726,8 @@ def pick_stories(pool):
                 continue
             if in_prior_cluster(candidate):
                 continue
+            if headline_clashes_prior(candidate):
+                continue
             if clashes_with_selected(candidate):
                 continue
             selected.append(candidate)
@@ -685,7 +737,7 @@ def pick_stories(pool):
                 break
 
     # Fallback 2: URLs we saw in prior runs (within token window). Still gated
-    # by cluster check so we don't literally re-air the same incident.
+    # by cluster + headline checks so we don't literally re-air the same story.
     if len(selected) < TARGET_STORIES:
         for candidate in duplicate_pool:
             if candidate['source_url'] in used_links:
@@ -693,6 +745,8 @@ def pick_stories(pool):
             if not candidate.get('image_url'):
                 continue
             if in_prior_cluster(candidate):
+                continue
+            if headline_clashes_prior(candidate):
                 continue
             if clashes_with_selected(candidate):
                 continue
@@ -715,6 +769,7 @@ def pick_stories(pool):
             and hot_score(c['headline_vi'] + ' ' + c['summary_vi']) > 0
             and not is_soft_news(c['headline_vi'] + ' ' + c['summary_vi'])
             and not in_prior_cluster(c)
+            and not headline_clashes_prior(c)
             and len(set(c['tokens']) & prior_tokens) < 5
         ]
         for hot_candidate in hot_pool:
@@ -744,7 +799,10 @@ def pick_stories(pool):
                 break
 
     selected = sorted(selected, key=final_rank, reverse=True)[:TARGET_STORIES]
-    return selected, prior_categories, prior_links, prior_clusters, scanned_tokens, scanned_clusters
+    return (
+        selected, prior_categories, prior_links, prior_clusters,
+        prior_headline_sets, scanned_tokens, scanned_clusters,
+    )
 
 
 
@@ -770,7 +828,10 @@ for idx, entry in enumerate(raw_entries, start=1):
         continue
     pool.append(story)
 
-stories, prior_categories, prior_links, prior_clusters, prior_scanned_tokens, prior_scanned_clusters = pick_stories(pool)
+(
+    stories, prior_categories, prior_links, prior_clusters,
+    prior_headline_sets, prior_scanned_tokens, prior_scanned_clusters,
+) = pick_stories(pool)
 if len(stories) < TARGET_STORIES:
     raise RuntimeError(f'Not enough dynamic VN stories gathered. feeds={len(raw_entries)} selected={len(stories)} errors={feed_errors}')
 
@@ -980,6 +1041,7 @@ anti_repeat_note = (
         f"Prior categories avoided where possible: {', '.join(sorted(prior_categories))}. "
         f"Token window: last {ROLLING_HOURS}h, runs scanned: {prior_scanned_tokens}, prior links: {len(prior_links)}. "
         f"Cluster window: last {CLUSTER_ROLLING_HOURS}h, runs scanned: {prior_scanned_clusters}, prior clusters: {len(prior_clusters)}. "
+        f"Headline-Jaccard window: last {CLUSTER_ROLLING_HOURS}h, prior headlines: {len(prior_headline_sets)}, threshold: {HEADLINE_JACCARD_BLOCK}. "
         f"Max story age: {MAX_STORY_AGE_HOURS}h."
         if prior_scanned_clusters else
         f"No recent metadata found in last {CLUSTER_ROLLING_HOURS}h for anti-repeat comparison."
