@@ -690,7 +690,7 @@ for story in stories:
     )
 (RUN_DIR / 'manifest.txt').write_text('\n'.join(manifest_lines) + '\n', encoding='utf-8')
 
-remote = f'gdrive:OpenClaw Database/news-videos/{RUN_DATE}/{RUN_HHMM}/'
+remote = f'gdrive:news-videos/{RUN_DATE}/{RUN_HHMM}/'
 copy_proc = subprocess.run(['rclone', 'copy', str(RUN_DIR), remote, '--create-empty-src-dirs', '--checksum'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 list_proc = subprocess.run(['rclone', 'lsf', remote, '-R'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 local_files = []
