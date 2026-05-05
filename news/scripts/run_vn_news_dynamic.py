@@ -1136,7 +1136,7 @@ def update_history(stories):
 
 update_history(stories)
 
-remote = f'gdrive:OpenClaw Database/news-videos-vn/{RUN_DATE}/{RUN_HHMM}/'
+remote = f'gdrive:news-videos-vn/{RUN_DATE}/{RUN_HHMM}/'
 copy_cmd = ['rclone', 'copy', str(RUN_DIR), remote, '--create-empty-src-dirs', '--checksum']
 copy_proc = subprocess.run(copy_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 list_proc = subprocess.run(['rclone', 'lsf', remote, '-R'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)

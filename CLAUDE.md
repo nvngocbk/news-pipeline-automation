@@ -70,7 +70,7 @@ Anti-repeat compares **topic clusters**, not exact titles. When debugging a VN r
 
 ## Host assumptions
 
-All absolute paths target the production mini-PC (`/home/nv-ngoc/...`), e.g. service account keys at `/home/nv-ngoc/keys/tts-sa.json` and the rclone remote `gdrive:OpenClaw Database/...`. These scripts will not run as-is on a dev laptop without either that filesystem layout or code changes. When editing, prefer keeping these paths centralized rather than sprinkling more literals.
+All absolute paths target the production mini-PC (`/home/nv-ngoc/...`), e.g. service account keys at `/home/nv-ngoc/keys/tts-sa.json` and the rclone remote `gdrive:` rooted at the OpenClaw Database folder, with relative paths like `gdrive:news-videos-vn/...`. These scripts will not run as-is on a dev laptop without either that filesystem layout or code changes. When editing, prefer keeping these paths centralized rather than sprinkling more literals.
 
 ## VN vs World — quick differences
 
