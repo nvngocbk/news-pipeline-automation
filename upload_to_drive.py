@@ -5,7 +5,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
-SERVICE_ACCOUNT_FILE = '/home/minipc/keys/symbolic-pipe-491806-a8-ce6c0558fdce.json'
+SERVICE_ACCOUNT_FILE = '/home/nv-ngoc/keys/symbolic-pipe-491806-a8-ce6c0558fdce.json'
 DEFAULT_FOLDER_ID = '12u7OAjH7VRcgDS0zWZ9pVrwYY81R7t3p'
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
