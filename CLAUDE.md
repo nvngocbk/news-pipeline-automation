@@ -19,8 +19,8 @@ Three top-level files are thin re-export shims — the real code is in [news/](n
 These are the **only** entrypoints cron is allowed to use (rule 2 in NEWS_PIPELINE_RULES.md). Any older snapshot/manual scripts belong in `legacy/`. There is no build/test/lint tooling; scripts are invoked directly:
 
 ```
-python run_vn_news_dynamic.py
-python run_world_news_dynamic.py
+python3 run_vn_news_dynamic.py
+python3 run_world_news_dynamic.py
 ```
 
 Running a single pipeline end-to-end performs network fetches, ffmpeg transcodes, Google TTS calls, and an rclone upload — it is not a cheap local test. To dry-run a specific window, set `RUN_DATE` / `RUN_HHMM` (see below).
