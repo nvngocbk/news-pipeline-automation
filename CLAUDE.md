@@ -52,12 +52,12 @@ Cron must not inherit focus from an ad-hoc manual test — leave these unset in 
 
 The pipelines diverge here and it matters when debugging "why did this story repeat":
 
-- **VN** reads/writes a single JSONL at `/home/minipc/.openclaw/workspace/news-vn-history.jsonl` and runs **two** anti-repeat windows in one walk:
+- **VN** reads/writes a single JSONL at `/home/nv-ngoc/.openclaw/workspace/news-vn-history.jsonl` and runs **two** anti-repeat windows in one walk:
   - **Token window** (`ROLLING_HOURS`, default 24h): compares tokens + `source_url` + categories; drops a candidate with ≥5-token overlap against priors when no `FOCUS_KEYWORDS` match.
   - **Cluster-signature window** (`CLUSTER_ROLLING_HOURS`, default 168h / 7 days): each story has `cluster_keys` of the form `<proper-noun>@<event>` (e.g. `vĩnh tuy@cháy`). A candidate whose any key hits a prior cluster is **hard-dropped** — no hot-score or recency bypass. This is the layer that stops day-N follow-up coverage of a week-old incident from resurfacing. Broad locations (`hà nội`, `tp hcm`, `đà nẵng`, …) are blocklisted from cluster keys so unrelated incidents in the same major city don't collide.
   - A hard age cap `MAX_STORY_AGE_HOURS` (default 36h) is applied **before** ranking in the main pass. Hot stories no longer bypass it; only focus-keyword matches do.
   - `PRIOR_FILES_TO_SCAN` (default 50) caps the outer history walk and must be ≥ expected runs-per-day × 7 for the cluster window to see its full range.
-- **World** walks the prior `metadata.json` files under `/home/minipc/.openclaw/workspace/news-videos/{RUN_DATE}/`, optionally `{yesterday}/` when `INCLUDE_YESTERDAY=1`, scanning the last `PRIOR_FILES_TO_SCAN` runs. World does **not** use cluster signatures — it compares tokens only.
+- **World** walks the prior `metadata.json` files under `/home/nv-ngoc/.openclaw/workspace/news-videos/{RUN_DATE}/`, optionally `{yesterday}/` when `INCLUDE_YESTERDAY=1`, scanning the last `PRIOR_FILES_TO_SCAN` runs. World does **not** use cluster signatures — it compares tokens only.
 
 Anti-repeat compares **topic clusters**, not exact titles. When debugging a VN repeat, check both: `metadata.json` → `anti_repeat_note` prints both windows and prior-cluster count; the history JSONL contains `cluster_keys` per story (legacy rows without `cluster_keys` are derived on the fly).
 
@@ -70,7 +70,7 @@ Anti-repeat compares **topic clusters**, not exact titles. When debugging a VN r
 
 ## Host assumptions
 
-All absolute paths target the production mini-PC (`/home/minipc/...`), e.g. service account keys at `/home/minipc/keys/tts-sa.json` and the rclone remote `gdrive:OpenClaw Database/...`. These scripts will not run as-is on a dev laptop without either that filesystem layout or code changes. When editing, prefer keeping these paths centralized rather than sprinkling more literals.
+All absolute paths target the production mini-PC (`/home/nv-ngoc/...`), e.g. service account keys at `/home/nv-ngoc/keys/tts-sa.json` and the rclone remote `gdrive:OpenClaw Database/...`. These scripts will not run as-is on a dev laptop without either that filesystem layout or code changes. When editing, prefer keeping these paths centralized rather than sprinkling more literals.
 
 ## VN vs World — quick differences
 
@@ -80,10 +80,10 @@ All absolute paths target the production mini-PC (`/home/minipc/...`), e.g. serv
 | Story count | 8–10 (clamped) | 5 |
 | Translation | none (content already vi) | Google translate REST → `vi`, prefixed with `Theo {source},` |
 | TTS | `google-cloud-texttospeech` client, `vi-VN-Neural2-A`, per-story segments concatenated | REST call, fallback chain `Chirp3-HD-Aoede → Neural2-A → Wavenet-A`, single file |
-| Run base | `/home/minipc/.openclaw/workspace/news-videos-vn/{date}/{hhmm}` | `/home/minipc/.openclaw/workspace/news-videos/{date}/{hhmm}` |
+| Run base | `/home/nv-ngoc/.openclaw/workspace/news-videos-vn/{date}/{hhmm}` | `/home/nv-ngoc/.openclaw/workspace/news-videos/{date}/{hhmm}` |
 | History | JSONL rolling file | prior `metadata.json` per run |
 | Image style | fit + blurred background (letterbox safe) | center-crop + lanczos + unsharp |
 
 ## One-off helper
 
-[upload_to_drive.py](upload_to_drive.py) uploads a single file via the Google Drive API using a service account at `/home/minipc/keys/symbolic-pipe-491806-a8-ce6c0558fdce.json` into a hardcoded default folder. It is **not** part of the pipeline flow (pipelines use rclone); treat it as a manual tool.
+[upload_to_drive.py](upload_to_drive.py) uploads a single file via the Google Drive API using a service account at `/home/nv-ngoc/keys/symbolic-pipe-491806-a8-ce6c0558fdce.json` into a hardcoded default folder. It is **not** part of the pipeline flow (pipelines use rclone); treat it as a manual tool.

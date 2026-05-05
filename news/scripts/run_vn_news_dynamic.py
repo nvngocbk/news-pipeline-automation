@@ -20,7 +20,7 @@ RUN_DATE = runtime.run_date
 RUN_HHMM = runtime.run_hhmm
 RUN_HOUR = runtime.spoken_hour_vi
 CURRENT_RUN_KEY = f"{RUN_DATE}-{RUN_HHMM}"
-BASE = Path('/home/minipc/.openclaw/workspace/news-videos-vn')
+BASE = Path('/home/nv-ngoc/.openclaw/workspace/news-videos-vn')
 RUN_DIR = BASE / RUN_DATE / RUN_HHMM
 PREP_DIR = RUN_DIR / 'prepared'
 SRC_DIR = RUN_DIR / 'source-images'
@@ -29,7 +29,7 @@ RUN_DIR.mkdir(parents=True, exist_ok=True)
 PREP_DIR.mkdir(exist_ok=True)
 SRC_DIR.mkdir(exist_ok=True)
 TMP_DIR.mkdir(exist_ok=True)
-HISTORY_PATH = Path('/home/minipc/.openclaw/workspace/news-vn-history.jsonl')
+HISTORY_PATH = Path('/home/nv-ngoc/.openclaw/workspace/news-vn-history.jsonl')
 HISTORY_MAX_LINES = int(os.environ.get('HISTORY_MAX_LINES', '1500'))
 
 FEEDS = [
@@ -960,7 +960,7 @@ files = {
 for name, content in files.items():
     (RUN_DIR / name).write_text(content, encoding='utf-8')
 
-os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = '/home/minipc/keys/tts-sa.json'
+os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = '/home/nv-ngoc/keys/tts-sa.json'
 client = texttospeech.TextToSpeechClient()
 voice = texttospeech.VoiceSelectionParams(language_code='vi-VN', name='vi-VN-Neural2-A')
 audio_config = texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.LINEAR16, speaking_rate=1.15)
@@ -1169,5 +1169,5 @@ summary = {
 if upload_ok:
     shutil.rmtree(RUN_DIR)
     summary['local_deleted'] = True
-Path('/home/minipc/.openclaw/workspace/news-video-last-summary.json').write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding='utf-8')
+Path('/home/nv-ngoc/.openclaw/workspace/news-video-last-summary.json').write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding='utf-8')
 print(json.dumps(summary, ensure_ascii=False, indent=2))

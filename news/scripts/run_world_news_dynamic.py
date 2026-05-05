@@ -20,7 +20,7 @@ runtime = get_runtime()
 RUN_DATE = runtime.run_date
 RUN_HHMM = runtime.run_hhmm
 RUN_HOUR = runtime.spoken_hour_vi
-BASE = Path('/home/minipc/.openclaw/workspace/news-videos')
+BASE = Path('/home/nv-ngoc/.openclaw/workspace/news-videos')
 RUN_DIR = BASE / RUN_DATE / RUN_HHMM
 SRC_DIR = RUN_DIR / 'source-images'
 PREP_DIR = RUN_DIR / 'prepared'
@@ -28,7 +28,7 @@ TMP_DIR = RUN_DIR / 'tmp'
 for path in [RUN_DIR, SRC_DIR, PREP_DIR, TMP_DIR]:
     path.mkdir(parents=True, exist_ok=True)
 
-KEY = '/home/minipc/keys/tts-sa.json'
+KEY = '/home/nv-ngoc/keys/tts-sa.json'
 TRANSLATE_URL = 'https://translate.googleapis.com/translate_a/single'
 TRANSLATE_CACHE = {}
 
