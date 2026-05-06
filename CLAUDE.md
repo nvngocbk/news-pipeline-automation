@@ -16,7 +16,7 @@ Three top-level files are thin re-export shims — the real code is in [news/](n
 - [run_world_news_dynamic.py](run_world_news_dynamic.py) → [news/scripts/run_world_news_dynamic.py](news/scripts/run_world_news_dynamic.py)
 - [news_runtime.py](news_runtime.py) → [news/core/runtime.py](news/core/runtime.py)
 
-These are the **only** entrypoints cron is allowed to use (rule 2 in NEWS_PIPELINE_RULES.md). Any older snapshot/manual scripts belong in `legacy/`. There is no build/test/lint tooling; scripts are invoked directly:
+These are the **only** entrypoints cron is allowed to use (rule 2 in NEWS_PIPELINE_RULES.md). If older snapshot/manual scripts get reintroduced, park them under `legacy/` (the directory is not present today). There is no build/test/lint tooling; scripts are invoked directly:
 
 ```
 python3 run_vn_news_dynamic.py
@@ -65,12 +65,18 @@ Anti-repeat compares **topic clusters**, not exact titles. When debugging a VN r
 
 - Only the final selected stories should have images downloaded / ffmpeg-processed. Do not add "prepare everything in the pool then pick" flows — that was an observed regression (rule 8).
 - Upload is success only when all four hold: ffmpeg render OK, `rclone copy` rc==0, `rclone lsf -R` rc==0, and `missing_remote_files == []`. The local `RUN_DIR` is deleted **only** inside this gate; otherwise it must be preserved for rerun (rules 10–11).
-- The final JSON summary (printed to stdout + written to `news-video-last-summary*.json`) must reflect reality: no "uploaded + deleted" when Drive is actually missing files.
+- The final JSON summary (printed to stdout + also written to disk) must reflect reality: no "uploaded + deleted" when Drive is actually missing files. The on-disk paths differ between pipelines:
+  - VN → `/home/nv-ngoc/.openclaw/workspace/news-video-last-summary.json` (fixed path)
+  - World → `news-video-last-summary-world.json` written next to that run's `metadata.json` under the run base
+  When debugging "where is the World summary?", check the per-run directory, not the workspace root.
 - Rule 9 voice style (VN): short opening, spoken hour as `6 giờ` / `19 giờ`, never `06 giờ 00`, no gratuitous date/year in the intro.
+- Rule 9 date/time formatting (VN + World, **TTS input only**): if a specific moment must be spoken, spell it out — `12 giờ 30 phút ngày 12 tháng 12 năm 2025`. Never feed `12-12-2025`, `12/12/2025`, `2025-12-12`, or `06/05` into Google TTS — the `-` and `/` get pronounced literally and abbreviated numerals get read digit-by-digit. Captions, overlays, filenames, run dirs, Drive paths, and logs are unaffected — abbreviated forms are fine there. Normalize before sending to TTS, not at the source.
 
 ## Host assumptions
 
 All absolute paths target the production mini-PC (`/home/nv-ngoc/...`), e.g. service account keys at `/home/nv-ngoc/keys/tts-sa.json` and the rclone remote `gdrive:` rooted at the OpenClaw Database folder, with relative paths like `gdrive:news-videos-vn/...`. These scripts will not run as-is on a dev laptop without either that filesystem layout or code changes. When editing, prefer keeping these paths centralized rather than sprinkling more literals.
+
+External binaries are hard prerequisites — not Python deps. The host must have `ffmpeg` (image/video transcode + audio concat) and `rclone` with a configured `gdrive:` remote (the upload step shells out to `rclone copy` + `rclone lsf -R`). Don't try to `pip install` these.
 
 ## VN vs World — quick differences
 
