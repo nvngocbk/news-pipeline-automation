@@ -114,6 +114,25 @@ thì pipeline phải:
 - tương tự: opening ngắn, tự nhiên
 - không gắn timestamp/date overlay lên khung hình nếu không có yêu cầu riêng
 
+### Định dạng ngày/giờ trong voice script (áp dụng cả VN và World)
+
+**Chỉ áp dụng cho text đưa vào TTS.** Caption/overlay/text hiển thị trên khung hình KHÔNG bị ràng buộc bởi rule này — viết tắt thoải mái cho gọn.
+
+Khi voice script phải nhắc tới một mốc thời gian cụ thể (giờ, ngày, tháng, năm), bắt buộc viết đầy đủ bằng chữ Việt, không dùng dấu `-`, `/`, `:`, không viết tắt số:
+
+- đúng: `12 giờ 30 phút ngày 12 tháng 12 năm 2025`
+- đúng: `19 giờ ngày 6 tháng 5 năm 2026`
+- sai: `12-12-2025`, `12/12/2025`, `2025-12-12`, `06/05`, `12:30 12/12/2025`
+
+Lý do: Google TTS đọc dấu `-` và `/` ra âm thanh kỳ quặc ("mười hai gạch ngang mười hai..."), và không phân biệt được dạng viết tắt nên đọc rời từng số. Phải tự normalize TRƯỚC khi gửi sang TTS.
+
+Phạm vi không áp dụng (giữ chuẩn `YYYY-MM-DD` / `HHMM` như rule 1):
+- tên file
+- thư mục run
+- Drive path
+- metadata/log nội bộ
+- caption / overlay / text trên video
+
 ## 10) Upload phải verify thật
 
 Chỉ được báo success khi đủ cả 4 điều kiện:
