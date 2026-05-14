@@ -13,7 +13,16 @@ from pathlib import Path
 
 from google.cloud import texttospeech
 
+from news.core.dotenv import load_dotenv
+
+# Load .env from repo root BEFORE importing modules that read env at import
+# time (ai_summarize captures CHIASEGPU_* at import). Existing shell/cron env
+# always wins — see news/core/dotenv.py.
+load_dotenv(Path(__file__).resolve().parents[2] / '.env')
+
 from news.core.runtime import get_runtime, vn_video_filename
+from news.core.article_extract import fetch_article_body
+from news.core.ai_summarize import summarize_for_bulletin
 
 runtime = get_runtime()
 RUN_DATE = runtime.run_date
@@ -37,20 +46,17 @@ FEEDS = [
     ('VnExpress-Thời sự', 'https://vnexpress.net/rss/thoi-su.rss'),
     ('Tuổi Trẻ-Thời sự', 'https://tuoitre.vn/rss/thoi-su.rss'),
     ('VietnamNet-Thời sự', 'https://vietnamnet.vn/rss/thoi-su.rss'),
-    ('Dân Trí-Xã hội', 'https://dantri.com.vn/rss/xa-hoi.rss'),
     ('VietnamPlus', 'https://www.vietnamplus.vn/rss/tin-moi-nhat.rss'),
     # Firehose feeds last — used only to fill gaps after desk feeds
     ('VnExpress', 'https://vnexpress.net/rss/tin-moi-nhat.rss'),
     ('Tuổi Trẻ', 'https://tuoitre.vn/rss/tin-moi-nhat.rss'),
     ('VietnamNet', 'https://vietnamnet.vn/rss/home.rss'),
-    ('Dân Trí', 'https://dantri.com.vn/rss/home.rss'),
 ]
 
 FOCUS_FEEDS = [
     ('VnExpress-Thời sự', 'https://vnexpress.net/rss/thoi-su.rss'),
     ('Tuổi Trẻ-Thời sự', 'https://tuoitre.vn/rss/thoi-su.rss'),
     ('VietnamNet-Thời sự', 'https://vietnamnet.vn/rss/thoi-su.rss'),
-    ('Dân Trí-Xã hội', 'https://dantri.com.vn/rss/xa-hoi.rss'),
 ]
 
 STOPWORDS = {
@@ -162,8 +168,8 @@ CATEGORY_PRIORITY = {
 
 PRIOR_FILES_TO_SCAN = int(os.environ.get('PRIOR_FILES_TO_SCAN', '50'))
 ROLLING_HOURS = int(os.environ.get('ROLLING_HOURS', '24'))
-TARGET_STORIES = int(os.environ.get('TARGET_STORIES', '8'))
-TARGET_STORIES = max(8, min(10, TARGET_STORIES))
+TARGET_STORIES = int(os.environ.get('TARGET_STORIES', '5'))
+TARGET_STORIES = max(5, min(10, TARGET_STORIES))
 FOCUS_KEYWORDS = [x.strip().lower() for x in os.environ.get('FOCUS_KEYWORDS', '').split('|') if x.strip()]
 INCLUDE_YESTERDAY = os.environ.get('INCLUDE_YESTERDAY', '0') == '1'
 MIN_FOCUS_MATCHES = int(os.environ.get('MIN_FOCUS_MATCHES', str(max(3, TARGET_STORIES // 2))))
@@ -839,6 +845,25 @@ stories = stories[:TARGET_STORIES]
 for idx, story in enumerate(stories, start=1):
     story['id'] = f'story-{idx:02d}'
 
+# AI rewrite of summary_vi using full article body. Pure TTS-layer enhancement:
+# anti-repeat tokens / cluster_keys keep their RSS-based values so editorial
+# decisions stay deterministic. Any failure (no key, fetch fail, AI fail) leaves
+# the RSS-derived summary_vi in place — pipeline never breaks on AI.
+for story in stories:
+    story['summary_source'] = 'rss'
+    body = fetch_article_body(story.get('source_url', ''))
+    if not body:
+        print(f"[ai] {story['id']} body fetch failed; keeping RSS summary", flush=True)
+        continue
+    ai_text = summarize_for_bulletin(story.get('headline_vi', ''), body)
+    if not ai_text:
+        print(f"[ai] {story['id']} AI summarize failed; keeping RSS summary", flush=True)
+        continue
+    story['summary_vi'] = ai_text
+    story['summary_en'] = ai_text
+    story['summary_source'] = 'ai'
+    print(f"[ai] {story['id']} rewrote summary ({len(ai_text)} chars)", flush=True)
+
 all_sources = []
 for s in stories:
     src = s['sources'][0]
@@ -871,12 +896,19 @@ def build_journalist_voice(stories_local):
             # Skip a leading sentence that duplicates the headline.
             if sentences and sentences[0].rstrip('.!?').strip().lower() == headline_norm:
                 sentences = sentences[1:]
-            detail = ' '.join(sentences[:2]).strip()
+            # AI rewrites are already shaped as a 3-5 sentence broadcast paragraph
+            # — read in full. RSS descriptions are unbounded boilerplate, so cap
+            # them at 2 sentences as before.
+            if s.get('summary_source') == 'ai':
+                detail_sentences = sentences
+            else:
+                detail_sentences = sentences[:2]
+            detail = ' '.join(detail_sentences).strip()
             if detail and not detail.endswith(('.', '!', '?')):
                 detail += '.'
             if detail:
                 block = f"{headline}. {detail}".strip()
-                sentence_count = len(sentences[:2]) + 1
+                sentence_count = len(detail_sentences) + 1
             else:
                 block = headline if headline.endswith(('.', '!', '?')) else headline + '.'
                 sentence_count = 1
@@ -1084,6 +1116,7 @@ for s in stories:
         'headline_en': s['headline_en'],
         'summary_vi': s['summary_vi'],
         'summary_en': s['summary_en'],
+        'summary_source': s.get('summary_source', 'rss'),
         'source_name': s['source_name'],
         'source_url': s['source_url'],
         'secondary_sources': s['sources'][1:],
