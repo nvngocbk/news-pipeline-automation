@@ -22,7 +22,7 @@ load_dotenv(Path(__file__).resolve().parents[2] / '.env')
 
 from news.core.runtime import get_runtime, vn_video_filename
 from news.core.article_extract import fetch_article_body
-from news.core.ai_summarize import summarize_for_bulletin
+from news.core.ai_summarize import summarize_for_bulletin, select_stories
 
 runtime = get_runtime()
 RUN_DATE = runtime.run_date
@@ -811,6 +811,77 @@ def pick_stories(pool):
     )
 
 
+def filter_candidates_for_ai(pool):
+    """Apply anti-repeat hard drops and editorial filters to pool.
+
+    Returns (filtered_pool, anti_repeat_state) where anti_repeat_state is the same
+    7-tuple returned by pick_stories() so the history-update path is unchanged.
+    Algorithmic ranking/selection is intentionally skipped — that is left to AI.
+    """
+    (
+        prior_tokens, prior_categories, prior_links, prior_clusters,
+        prior_headline_sets, scanned_tokens, scanned_clusters,
+    ) = load_prior_headlines()
+
+    def _focus_score(candidate):
+        if not FOCUS_KEYWORDS:
+            return 0
+        hay = (candidate['headline_vi'] + ' ' + candidate['summary_vi']).lower()
+        return sum(1 for kw in FOCUS_KEYWORDS if kw in hay)
+
+    def _age_hours(candidate):
+        pub_dt = candidate.get('pub_dt')
+        if not pub_dt:
+            return None
+        if pub_dt.tzinfo is None:
+            pub_dt = pub_dt.replace(tzinfo=runtime.now.tzinfo)
+        else:
+            pub_dt = pub_dt.astimezone(runtime.now.tzinfo)
+        return (runtime.now - pub_dt).total_seconds() / 3600
+
+    def _in_prior_cluster(candidate):
+        return any(k in prior_clusters for k in (candidate.get('cluster_keys') or []))
+
+    def _headline_clashes(candidate):
+        if HEADLINE_JACCARD_BLOCK >= 1.0 or not prior_headline_sets:
+            return False
+        cand = headline_token_set(candidate.get('headline_vi', ''))
+        if not cand:
+            return False
+        for prior in prior_headline_sets:
+            if cand == prior:
+                return True
+            inter = len(cand & prior)
+            if not inter:
+                continue
+            if inter / len(cand | prior) >= HEADLINE_JACCARD_BLOCK:
+                return True
+        return False
+
+    filtered = []
+    for candidate in pool:
+        if not candidate.get('image_url'):
+            continue
+        text = candidate['headline_vi'] + ' ' + candidate['summary_vi']
+        if is_soft_news(text):
+            continue
+        age_h = _age_hours(candidate)
+        if age_h is not None and age_h > MAX_STORY_AGE_HOURS and _focus_score(candidate) == 0:
+            continue
+        if _in_prior_cluster(candidate):
+            continue
+        if _headline_clashes(candidate) and _focus_score(candidate) == 0:
+            continue
+        overlap = len(set(candidate['tokens']) & prior_tokens)
+        if overlap >= 5 and _focus_score(candidate) == 0:
+            continue
+        filtered.append(candidate)
+
+    anti_repeat_state = (
+        prior_tokens, prior_categories, prior_links, prior_clusters,
+        prior_headline_sets, scanned_tokens, scanned_clusters,
+    )
+    return filtered, anti_repeat_state
 
 
 raw_entries = []
@@ -834,21 +905,49 @@ for idx, entry in enumerate(raw_entries, start=1):
         continue
     pool.append(story)
 
+# --- Story selection: AI-first, algorithmic fallback ---
+# Phase 1: filter pool by anti-repeat hard drops + editorial hard filters.
+# Ranking / final selection is left to AI so it can weigh editorial importance
+# holistically rather than via heuristic scores.
+filtered_pool, _ar_state = filter_candidates_for_ai(pool)
 (
-    stories, prior_categories, prior_links, prior_clusters,
+    _prior_tokens_ar, prior_categories, prior_links, prior_clusters,
     prior_headline_sets, prior_scanned_tokens, prior_scanned_clusters,
-) = pick_stories(pool)
+) = _ar_state
+print(f"[ai-select] pool={len(pool)} → filtered={len(filtered_pool)}", flush=True)
+
+# Phase 2: ask AI to pick the best TARGET_STORIES from filtered_pool.
+used_ai_selection = False
+ai_indices = select_stories(filtered_pool, TARGET_STORIES, FOCUS_KEYWORDS or None)
+if ai_indices is not None:
+    stories = [filtered_pool[i] for i in ai_indices]
+    used_ai_selection = True
+    print(
+        f"[ai-select] AI selected {len(stories)}: "
+        + '; '.join(s['headline_vi'] for s in stories),
+        flush=True,
+    )
+else:
+    # Fallback: algorithmic pick_stories when AI is unavailable or fails.
+    print("[ai-select] AI selection unavailable; falling back to algorithmic pick_stories", flush=True)
+    (
+        stories, prior_categories, prior_links, prior_clusters,
+        prior_headline_sets, prior_scanned_tokens, prior_scanned_clusters,
+    ) = pick_stories(pool)
+
 if len(stories) < TARGET_STORIES:
-    raise RuntimeError(f'Not enough dynamic VN stories gathered. feeds={len(raw_entries)} selected={len(stories)} errors={feed_errors}')
+    raise RuntimeError(
+        f'Not enough stories. selected={len(stories)} filtered={len(filtered_pool)} '
+        f'pool={len(pool)} feeds={len(raw_entries)} errors={feed_errors}'
+    )
 
 stories = stories[:TARGET_STORIES]
 for idx, story in enumerate(stories, start=1):
     story['id'] = f'story-{idx:02d}'
 
-# AI rewrite of summary_vi using full article body. Pure TTS-layer enhancement:
-# anti-repeat tokens / cluster_keys keep their RSS-based values so editorial
-# decisions stay deterministic. Any failure (no key, fetch fail, AI fail) leaves
-# the RSS-derived summary_vi in place — pipeline never breaks on AI.
+# Phase 3: AI rewrites summary_vi from full article body (TTS quality layer).
+# anti-repeat tokens / cluster_keys keep RSS-based values so editorial decisions
+# stay deterministic. Any failure leaves RSS summary_vi in place.
 for story in stories:
     story['summary_source'] = 'rss'
     body = fetch_article_body(story.get('source_url', ''))
@@ -1067,8 +1166,9 @@ subprocess.run([
 ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 video_duration = probe(video_path)
 
+_selection_mode = 'AI selection + ' if used_ai_selection else 'Algorithmic selection + '
 anti_repeat_note = (
-    'Dynamic RSS sourcing enabled. '
+    f'Dynamic RSS sourcing enabled. {_selection_mode}'
     + (
         f"Prior categories avoided where possible: {', '.join(sorted(prior_categories))}. "
         f"Token window: last {ROLLING_HOURS}h, runs scanned: {prior_scanned_tokens}, prior links: {len(prior_links)}. "
